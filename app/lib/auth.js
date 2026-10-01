@@ -50,6 +50,8 @@ function initAuth(pool) {
     // better-auth 本身也会读 BETTER_AUTH_SECRET / BETTER_AUTH_URL，这里显式传入以明确来源。
     secret: process.env.BETTER_AUTH_SECRET || undefined,
     baseURL: process.env.BETTER_AUTH_URL || 'http://localhost:3000',
+    // 绝对地址 callbackURL 必须显式信任，否则 sign-in 报 Invalid callbackURL
+    trustedOrigins: [process.env.BETTER_AUTH_URL || 'http://localhost:3000'],
     // 直接传 pg.Pool（better-auth 1.7.x 内置支持，无需 ORM 适配器）。
     database: pool,
     socialProviders,

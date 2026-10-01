@@ -72,7 +72,7 @@ async function boot() {
             body: JSON.stringify({
               provider: p,
               // 绝对地址：baseURL 所在 origin 自动可信
-              callbackURL: location.origin + '/',
+              callbackURL: '/',
             }),
           });
           const d = await r.json();
