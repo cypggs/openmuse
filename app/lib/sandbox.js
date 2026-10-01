@@ -1,22 +1,32 @@
-// openmuse v2 — per-user E2B sandbox manager (muse-style persistent sandbox).
+// openmuse v2.1 — per-user E2B sandbox manager (muse-style persistent sandbox).
 //
-// Design: one long-lived E2B sandbox per user. get-or-create on demand,
-// heartbeat (setTimeout) after each tool use, idle reaper snapshots the
-// workspace to S3 and kills the sandbox; next use restores from snapshot.
+// 三层持久化设计（E2B 原生优先）：
+//  1. 原生 pause/resume：空闲 20min 后 pause()（保留完整内存快照）。paused 的
+//     sandbox 不计费、不占并发、可 indefinite 停留；下次使用时
+//     Sandbox.connect() 自动 resume（约 1s）。创建时带
+//     lifecycle: { onTimeout: 'pause', autoResume: true }，超时也走 pause 而非 kill。
+//  2. 原生 snapshot 检查点：每 50 次 tool 执行 createSnapshot() 一次，只保留最新
+//     一个；sandbox 被彻底删除时可从 snapshot 重建。
+//  3. S3 导出层（可移植性）：exportToS3/importFromS3 把工作区打包成 tar.gz 存到
+//     S3 兼容存储，用于跨平台迁移 / 手动备份，不在热路径上。
 //
-// Secrets (E2B_API_KEY, DATABASE_URL, AWS_*) are read only from
-// process.env and are never logged or written anywhere.
+// 参考：E2B 官方 persistence 文档（sandbox pause & resume / snapshots）。
+// 注意：JS SDK 的 SandboxOpts 里没有顶层的 autoPause 字段（那是底层
+// NewSandbox API schema 的字段），等价能力是 lifecycle.onTimeout。
+//
+// Secrets (E2B_API_KEY, DATABASE_URL, AWS_*) 只从 process.env 读，绝不打印。
 'use strict';
 
 const path = require('path');
-const { Sandbox } = require('e2b');
+const { Sandbox, SandboxNotFoundError, NotFoundError } = require('e2b');
 const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 
 const WORKDIR = '/home/user/openmuse-work';
 const LIFETIME_MS = 3_600_000; // Hobby plan max sandbox lifetime: 1h
-const IDLE_KILL_MS = 20 * 60_000; // snapshot + kill after 20 min idle
-const SNAP_PREFIX = 'sandbox-snapshots/';
+const IDLE_PAUSE_MS = 20 * 60_000; // idle 20min -> pause (paused 不计费、可 indefinite 停留)
+const CHECKPOINT_EVERY = 50; // 每 50 次 tool 执行做一次原生 snapshot 检查点
 const REAPER_INTERVAL_MS = 60_000;
+const SNAP_PREFIX = 'sandbox-snapshots/'; // 仅 S3 导出层使用
 
 const E2B_API_KEY = process.env.E2B_API_KEY || '';
 
@@ -25,7 +35,8 @@ const SANDBOX_README = `# openmuse 云电脑
 这是你的专属云电脑工作区（/home/user/openmuse-work）。
 
 - openmuse 在这里为你执行命令、运行代码、读写文件
-- 这里的文件会持久保存：空闲时自动快照，下次使用时恢复
+- 空闲时自动 pause（内存和文件都保留），下次使用约 1 秒恢复
+- 每 50 次操作自动做一次原生 snapshot 检查点，可从快照重建
 - 你可以让 openmuse 在这里搭建项目、记笔记、跑脚本
 `;
 
@@ -36,11 +47,15 @@ function setPool(p) {
 }
 
 // ---------- in-memory live sandbox handles ----------
-const live = new Map(); // userId -> { sbx, lastActiveAt }
+// userId -> { sbx, lastActiveAt, paused, busy, toolCount }
+const live = new Map();
 
 function touch(userId) {
   const entry = live.get(userId);
-  if (entry) entry.lastActiveAt = Date.now();
+  if (entry) {
+    entry.lastActiveAt = Date.now();
+    entry.paused = false;
+  }
   if (pool) {
     pool
       .query('UPDATE user_sandboxes SET last_active_at = now() WHERE user_id = $1', [userId])
@@ -52,8 +67,27 @@ async function heartbeat(sbx) {
   try {
     await sbx.setTimeout(LIFETIME_MS);
   } catch (_) {
-    // best effort; sandbox has its own lifetime anyway
+    // best effort; sandbox has its own lifetime / auto-pause anyway
   }
+}
+
+function isNotFoundError(e) {
+  if (!e) return false;
+  return (
+    e.name === 'SandboxNotFoundError' ||
+    e.name === 'NotFoundError' ||
+    e instanceof SandboxNotFoundError ||
+    e instanceof NotFoundError
+  );
+}
+
+// JS SDK 等价于 autoPause 的写法：超时后 pause 而非 kill，流量可自动 resume。
+function createOpts(userId) {
+  return {
+    timeoutMs: LIFETIME_MS,
+    metadata: { owner: 'openmuse', userId: String(userId) },
+    lifecycle: { onTimeout: 'pause', autoResume: true },
+  };
 }
 
 // ---------- path safety: everything stays under WORKDIR ----------
@@ -70,7 +104,8 @@ function shellQuote(s) {
   return `'${String(s).replace(/'/g, `'\\''`)}'`;
 }
 
-// ---------- S3 snapshot store ----------
+// ---------- S3 导出层（可移植性，非热路径）----------
+// 主路径已是 E2B 原生 pause/resume + snapshot；这组函数只用于跨平台迁移 / 手动备份。
 function bucketName() {
   return process.env.BUCKET_NAME || '';
 }
@@ -87,9 +122,11 @@ function s3Client() {
   });
 }
 
-async function snapshotToS3(userId, sbx) {
+async function exportToS3(userId) {
   const bucket = bucketName();
-  if (!bucket) throw new Error('快照存储未配置（缺少 BUCKET_NAME 环境变量）');
+  if (!bucket) throw new Error('导出存储未配置（缺少 BUCKET_NAME 环境变量）');
+  const sbx = await findExisting(userId);
+  if (!sbx) throw new Error('没有可导出的云电脑（当前没有活跃的 sandbox）');
   const r = await sbx.commands.run(
     `mkdir -p ${WORKDIR} && tar czf /tmp/ws.tar.gz -C /home/user openmuse-work && base64 -w0 /tmp/ws.tar.gz`,
     { timeoutMs: 120_000 }
@@ -109,7 +146,7 @@ async function snapshotToS3(userId, sbx) {
   return { ok: true, bytes: buf.length };
 }
 
-async function restoreFromSnapshot(sbx, userId) {
+async function importFromS3(userId, sbx) {
   const bucket = bucketName();
   if (!bucket) return false;
   let b64;
@@ -131,40 +168,54 @@ async function restoreFromSnapshot(sbx, userId) {
     { timeoutMs: 120_000 }
   );
   if (r.exitCode !== 0) {
-    throw new Error('恢复快照失败：' + (r.stderr || '').slice(0, 200));
+    throw new Error('恢复导出包失败：' + (r.stderr || '').slice(0, 200));
   }
   return true;
 }
 
-// ---------- get-or-create (never auto-creates in findExisting) ----------
-async function connectIfAlive(sandboxId) {
-  try {
-    const sbx = await Sandbox.connect(sandboxId);
-    if (await sbx.isRunning()) return sbx;
-  } catch (_) {
-    // dead or gone — caller creates a fresh one
-  }
-  return null;
-}
-
+// ---------- get-or-create ----------
+// findExisting: 只找"能用的"（running，或 paused→connect 自动 resume），绝不新建。
 async function findExisting(userId) {
   const entry = live.get(userId);
   if (entry) {
     try {
       if (await entry.sbx.isRunning()) return entry.sbx;
     } catch (_) {}
+    // 没在跑——可能是 paused。connect() 会自动 resume paused 的 sandbox。
+    try {
+      const sbx = await Sandbox.connect(entry.sbx.sandboxId);
+      entry.sbx = sbx;
+      entry.paused = false;
+      entry.lastActiveAt = Date.now();
+      if (pool) {
+        pool
+          .query(`UPDATE user_sandboxes SET status = 'active', last_active_at = now() WHERE user_id = $1`, [
+            userId,
+          ])
+          .catch((e) => console.error('[openmuse] mark active failed:', e.message));
+      }
+      return sbx;
+    } catch (_) {}
     live.delete(userId);
   }
   if (!pool) return null;
   try {
-    const r = await pool.query('SELECT sandbox_id, status FROM user_sandboxes WHERE user_id = $1', [
-      userId,
-    ]);
-    if (r.rowCount > 0 && r.rows[0].status === 'active' && r.rows[0].sandbox_id) {
-      const sbx = await connectIfAlive(r.rows[0].sandbox_id);
-      if (sbx) {
-        live.set(userId, { sbx, lastActiveAt: Date.now() });
+    const r = await pool.query(
+      'SELECT sandbox_id, status FROM user_sandboxes WHERE user_id = $1',
+      [userId]
+    );
+    if (r.rowCount > 0 && r.rows[0].sandbox_id && (r.rows[0].status === 'active' || r.rows[0].status === 'paused')) {
+      try {
+        // connect 对 paused sandbox 自动 resume（约 1s）
+        const sbx = await Sandbox.connect(r.rows[0].sandbox_id);
+        live.set(userId, { sbx, lastActiveAt: Date.now(), paused: false, busy: false, toolCount: 0 });
+        if (r.rows[0].status === 'paused') {
+          await pool.query(`UPDATE user_sandboxes SET status = 'active' WHERE user_id = $1`, [userId]);
+        }
         return sbx;
+      } catch (e) {
+        if (!isNotFoundError(e)) console.error('[openmuse] sandbox reconnect failed:', e.message);
+        // NotFound → 掉到 getSandbox 的 snapshot 恢复路径
       }
     }
   } catch (e) {
@@ -180,20 +231,36 @@ async function getSandbox(userId) {
     await heartbeat(existing);
     return existing;
   }
-  const sbx = await Sandbox.create({
-    timeoutMs: LIFETIME_MS,
-    metadata: { owner: 'openmuse', userId: String(userId) },
-  });
-  let restored = false;
-  try {
-    restored = await restoreFromSnapshot(sbx, userId);
-  } catch (e) {
-    console.error('[openmuse] snapshot restore failed (continuing fresh):', e.message);
+
+  let snapshotId = null;
+  if (pool) {
+    try {
+      const r = await pool.query('SELECT snapshot_id FROM user_sandboxes WHERE user_id = $1', [userId]);
+      if (r.rowCount > 0) snapshotId = r.rows[0].snapshot_id || null;
+    } catch (e) {
+      console.error('[openmuse] snapshot lookup failed:', e.message);
+    }
   }
-  if (!restored) {
+
+  let sbx = null;
+  let how = 'fresh';
+  // 1) 原生 snapshot 恢复（sandbox 被彻底删除时的救生索）
+  if (snapshotId) {
+    try {
+      sbx = await Sandbox.create(snapshotId, createOpts(userId));
+      how = 'snapshot';
+    } catch (e) {
+      console.error('[openmuse] create-from-snapshot failed (continuing fresh):', e.message);
+      sbx = null;
+    }
+  }
+  // 2) 全新创建
+  if (!sbx) {
+    sbx = await Sandbox.create(createOpts(userId));
     await sbx.commands.run(`mkdir -p ${WORKDIR}`);
     await sbx.files.write(WORKDIR + '/README.md', SANDBOX_README);
   }
+
   if (pool) {
     await pool.query(
       `INSERT INTO user_sandboxes (user_id, sandbox_id, status, last_active_at)
@@ -203,10 +270,74 @@ async function getSandbox(userId) {
       [userId, sbx.sandboxId]
     );
   }
-  live.set(userId, { sbx, lastActiveAt: Date.now() });
+  live.set(userId, { sbx, lastActiveAt: Date.now(), paused: false, busy: false, toolCount: 0 });
   await heartbeat(sbx);
-  console.log(`[openmuse] sandbox ready for user=${userId} id=${sbx.sandboxId} restored=${restored}`);
+  console.log(`[openmuse] sandbox ready for user=${userId} id=${sbx.sandboxId} via=${how}`);
   return sbx;
+}
+
+// ---------- 原生 snapshot 检查点 ----------
+async function doCheckpoint(userId, sbx) {
+  let prev = null;
+  if (pool) {
+    try {
+      const r = await pool.query('SELECT snapshot_id FROM user_sandboxes WHERE user_id = $1', [userId]);
+      if (r.rowCount > 0) prev = r.rows[0].snapshot_id || null;
+    } catch (_) {}
+  }
+  const name = `openmuse-${String(userId).replace(/[^a-zA-Z0-9-]/g, '-')}-${Date.now()}`;
+  const info = await sbx.createSnapshot({ name });
+  if (pool) {
+    await pool.query('UPDATE user_sandboxes SET snapshot_id = $1 WHERE user_id = $2', [
+      info.snapshotId,
+      userId,
+    ]);
+  }
+  // 只保留最新一个检查点
+  if (prev && prev !== info.snapshotId) {
+    try {
+      await Sandbox.deleteSnapshot(prev);
+    } catch (e) {
+      console.error('[openmuse] delete old snapshot failed (non-fatal):', e.message);
+    }
+  }
+  console.log(`[openmuse] checkpoint ok user=${userId} snapshot=${info.snapshotId}`);
+  return { ok: true, snapshotId: info.snapshotId };
+}
+
+async function maybeCheckpoint(userId, sbx) {
+  const entry = live.get(userId);
+  if (!entry) return;
+  entry.toolCount = (entry.toolCount || 0) + 1;
+  if (entry.toolCount < CHECKPOINT_EVERY) return;
+  entry.toolCount = 0;
+  try {
+    await doCheckpoint(userId, sbx);
+  } catch (e) {
+    console.error('[openmuse] auto checkpoint failed (non-fatal):', e.message);
+  }
+}
+
+// 手动原生 snapshot（不自动创建 sandbox）。
+async function createCheckpoint(userId) {
+  if (!E2B_API_KEY) throw new Error('E2B_API_KEY 未配置，云电脑不可用');
+  const sbx = await findExisting(userId);
+  if (!sbx) throw new Error('没有可快照的云电脑（当前没有活跃的 sandbox）');
+  return doCheckpoint(userId, sbx);
+}
+
+// 手动 pause（默认保留完整内存快照）。
+async function pauseSandbox(userId) {
+  if (!E2B_API_KEY) throw new Error('E2B_API_KEY 未配置，云电脑不可用');
+  const sbx = await findExisting(userId);
+  if (!sbx) throw new Error('没有可暂停的云电脑（当前没有活跃的 sandbox）');
+  const paused = await sbx.pause();
+  const entry = live.get(userId);
+  if (entry) entry.paused = true;
+  if (pool) {
+    await pool.query(`UPDATE user_sandboxes SET status = 'paused' WHERE user_id = $1`, [userId]);
+  }
+  return { ok: true, alreadyPaused: paused === false };
 }
 
 // ---------- tools ----------
@@ -214,19 +345,26 @@ async function execCommand(userId, command, timeoutMs = 60000) {
   const cmd = String(command || '').trim();
   if (!cmd) throw new Error('command 不能为空');
   const sbx = await getSandbox(userId);
+  const entry = live.get(userId);
+  if (entry) entry.busy = true;
   let result;
   try {
-    result = await sbx.commands.run(cmd, { cwd: WORKDIR, timeoutMs });
-  } catch (e) {
-    // Some SDK versions surface non-zero exits as CommandExitError carrying .result
-    if (e && e.result && typeof e.result.exitCode === 'number') {
-      result = e.result;
-    } else {
-      throw e;
+    try {
+      result = await sbx.commands.run(cmd, { cwd: WORKDIR, timeoutMs });
+    } catch (e) {
+      // Some SDK versions surface non-zero exits as CommandExitError carrying .result
+      if (e && e.result && typeof e.result.exitCode === 'number') {
+        result = e.result;
+      } else {
+        throw e;
+      }
     }
+  } finally {
+    if (entry) entry.busy = false;
   }
   touch(userId);
   await heartbeat(sbx);
+  await maybeCheckpoint(userId, sbx);
   return {
     stdout: result.stdout || '',
     stderr: result.stderr || '',
@@ -237,22 +375,37 @@ async function execCommand(userId, command, timeoutMs = 60000) {
 async function readFile(userId, p) {
   const full = safePath(p); // validate before touching the sandbox
   const sbx = await getSandbox(userId);
-  const text = await sbx.files.read(full);
+  const entry = live.get(userId);
+  if (entry) entry.busy = true;
+  let text;
+  try {
+    text = await sbx.files.read(full);
+  } finally {
+    if (entry) entry.busy = false;
+  }
   touch(userId);
   await heartbeat(sbx);
+  await maybeCheckpoint(userId, sbx);
   return text;
 }
 
 async function writeFile(userId, p, content) {
   const full = safePath(p); // validate before touching the sandbox
   const sbx = await getSandbox(userId);
-  const dir = path.posix.dirname(full);
-  if (dir !== WORKDIR) {
-    await sbx.commands.run(`mkdir -p ${shellQuote(dir)}`);
+  const entry = live.get(userId);
+  if (entry) entry.busy = true;
+  try {
+    const dir = path.posix.dirname(full);
+    if (dir !== WORKDIR) {
+      await sbx.commands.run(`mkdir -p ${shellQuote(dir)}`);
+    }
+    await sbx.files.write(full, String(content == null ? '' : content));
+  } finally {
+    if (entry) entry.busy = false;
   }
-  await sbx.files.write(full, String(content == null ? '' : content));
   touch(userId);
   await heartbeat(sbx);
+  await maybeCheckpoint(userId, sbx);
   return { ok: true, path: full };
 }
 
@@ -263,14 +416,6 @@ async function runPython(userId, code) {
   await sbx.files.write(WORKDIR + '/.tmp_run.py', src);
   const r = await execCommand(userId, 'python3 .tmp_run.py');
   return r;
-}
-
-// Manual snapshot (does not create a sandbox if none exists).
-async function snapshot(userId) {
-  if (!E2B_API_KEY) throw new Error('E2B_API_KEY 未配置，云电脑不可用');
-  const sbx = await findExisting(userId);
-  if (!sbx) throw new Error('没有可快照的云电脑（当前没有活跃的 sandbox）');
-  return snapshotToS3(userId, sbx);
 }
 
 async function getStatus(userId) {
@@ -288,6 +433,13 @@ async function getStatus(userId) {
         lastActiveAt: new Date(entry.lastActiveAt).toISOString(),
       };
     }
+    if (entry.paused) {
+      return {
+        status: 'paused',
+        sandboxId: entry.sbx.sandboxId,
+        lastActiveAt: new Date(entry.lastActiveAt).toISOString(),
+      };
+    }
     live.delete(userId);
   }
   if (pool) {
@@ -298,8 +450,11 @@ async function getStatus(userId) {
       );
       if (r.rowCount > 0) {
         const row = r.rows[0];
+        // DB 是真相来源：'active' 但不在内存 map（进程重启过）→ 'idle'；
+        // 'paused' 保持 'paused'，下次使用 connect 自动 resume。
+        const st = row.status === 'active' ? 'idle' : row.status || 'none';
         return {
-          status: row.status === 'active' ? 'idle' : 'suspended',
+          status: st,
           sandboxId: row.sandbox_id,
           lastActiveAt: row.last_active_at ? new Date(row.last_active_at).toISOString() : null,
         };
@@ -311,7 +466,9 @@ async function getStatus(userId) {
   return { status: 'none', sandboxId: null, lastActiveAt: null };
 }
 
-// ---------- idle reaper: snapshot -> kill -> mark suspended ----------
+// ---------- idle reaper: pause (not kill) ----------
+// pause 保留完整内存快照；paused 不计费、不占并发、可 indefinite 停留。
+// pause 失败则保留在 map，下分钟重试——绝不 kill，避免丢数据。
 let reaperStarted = false;
 function startReaper() {
   if (reaperStarted) return;
@@ -323,37 +480,21 @@ function startReaper() {
   setInterval(async () => {
     const now = Date.now();
     for (const [userId, entry] of live) {
-      if (now - entry.lastActiveAt < IDLE_KILL_MS) continue;
-      let snapshotted = false;
+      if (entry.paused || entry.busy) continue;
+      if (now - entry.lastActiveAt < IDLE_PAUSE_MS) continue;
       try {
-        await snapshotToS3(userId, entry.sbx);
-        snapshotted = true;
-      } catch (e) {
-        // Don't kill if we couldn't persist the workspace; retry next round.
-        console.error(`[openmuse] idle snapshot failed for user=${userId}:`, e.message);
-        continue;
-      }
-      if (snapshotted) {
-        try {
-          await entry.sbx.kill();
-        } catch (e) {
-          console.error(`[openmuse] idle kill failed for user=${userId}:`, e.message);
-        }
-        live.delete(userId);
+        await entry.sbx.pause(); // 默认 keepMemory：完整内存快照
+        entry.paused = true;
         if (pool) {
-          try {
-            await pool.query(`UPDATE user_sandboxes SET status = 'suspended' WHERE user_id = $1`, [
-              userId,
-            ]);
-          } catch (e) {
-            console.error('[openmuse] mark suspended failed:', e.message);
-          }
+          await pool.query(`UPDATE user_sandboxes SET status = 'paused' WHERE user_id = $1`, [userId]);
         }
-        console.log(`[openmuse] sandbox suspended after idle: user=${userId}`);
+        console.log(`[openmuse] sandbox paused after idle: user=${userId}`);
+      } catch (e) {
+        console.error(`[openmuse] idle pause failed for user=${userId}, retry next round:`, e.message);
       }
     }
   }, REAPER_INTERVAL_MS).unref();
-  console.log('[openmuse] sandbox reaper started (idle 20min -> snapshot + kill)');
+  console.log('[openmuse] sandbox reaper started (idle 20min -> pause, keep memory)');
 }
 
 module.exports = {
@@ -366,5 +507,8 @@ module.exports = {
   readFile,
   writeFile,
   runPython,
-  snapshot,
+  createCheckpoint,
+  pauseSandbox,
+  exportToS3,
+  importFromS3,
 };

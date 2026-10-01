@@ -4,7 +4,8 @@
 MIT 开源，欢迎 fork 和 PR。
 
 v2 的核心是 **muse 式常驻 sandbox**：每个用户拥有一台长期存在的 Linux 云电脑，
-agent 可以在上面执行命令、运行代码、读写文件，工作区自动快照、跨会话保留。
+agent 可以在上面执行命令、运行代码、读写文件；E2B 原生 pause/resume +
+snapshot 检查点保证状态跨会话保留，约 1 秒恢复。
 
 ## 架构
 
@@ -17,11 +18,11 @@ agent 可以在上面执行命令、运行代码、读写文件，工作区自�
                     │    ├─ sandbox_exec           │
                     │    ├─ sandbox_run_python     │──▶ E2B：每用户一个常驻 sandbox
                     │    ├─ sandbox_read_file     │    /home/user/openmuse-work
-                    │    └─ sandbox_write_file    │
+                    │    └─ sandbox_write_file    │    原生 pause/resume + snapshot
                     │                              │
-                    │  lib/sandbox.js              │──▶ S3 兼容存储：工作区快照
-                    │   get-or-create / 心跳保活   │    sandbox-snapshots/<user>.tar.gz
-                    │   空闲 20min 快照+回收      │
+                    │  lib/sandbox.js              │──▶ S3 兼容存储：可移植性导出层
+                    │   get-or-create / 心跳保活   │    （手动 POST /api/sandbox/export）
+                    │   空闲 20min 原生 pause     │
                     └──────────────┬───────────────┘
                                    │ DATABASE_URL
                           ┌────────▼────────┐
@@ -37,9 +38,9 @@ agent 可以在上面执行命令、运行代码、读写文件，工作区自�
 - **流式中文对话**：DeepSeek `deepseek-chat`，SSE 逐 token 输出
 - **每用户一台云电脑**：E2B sandbox，`getSandbox()` 按需 get-or-create
 - **Agent tool loop**：模型自主决定调 `sandbox_exec / sandbox_run_python / sandbox_read_file / sandbox_write_file`，最多 8 轮；前端把工具调用渲染成可折叠的时间线卡片
-- **工作区持久化**：空闲 20 分钟自动 `tar` 快照到 S3，下次使用时恢复；也可手动 `POST /api/sandbox/snapshot`
+- **工作区持久化**：空闲 20 分钟 E2B 原生 `pause()`（保留内存），下次使用约 1 秒自动 resume；每 50 次操作原生 `snapshot` 检查点；也可手动 `POST /api/sandbox/snapshot` / `POST /api/sandbox/pause`
 - **会话记忆**：Postgres 存 sessions/messages，侧边栏切换历史
-- **状态可见**：侧边栏小圆点显示云电脑「就绪 / 休眠 / 未配置」
+- **状态可见**：侧边栏小圆点显示云电脑「就绪 / 暂停中 / 休眠 / 未配置」
 
 ## 环境变量
 
@@ -49,10 +50,10 @@ agent 可以在上面执行命令、运行代码、读写文件，工作区自�
 | `DATABASE_URL` | 是 | Postgres 连接串（会话、消息、sandbox 映射都靠它；缺失则聊天/工具不可用） |
 | `DEEPSEEK_API_KEY` | 是 | DeepSeek API key |
 | `E2B_API_KEY` | 是（云电脑） | E2B API key；缺失则云电脑相关接口返回 503，纯对话不受影响 |
-| `BUCKET_NAME` | 是（快照） | S3 兼容存储的 bucket 名 |
-| `AWS_ENDPOINT_URL_S3` | 是（快照） | S3 endpoint |
+| `BUCKET_NAME` | 是（S3 导出层，可选） | S3 兼容存储的 bucket 名 |
+| `AWS_ENDPOINT_URL_S3` | 是（S3 导出层，可选） | S3 endpoint |
 | `AWS_REGION` | 否 | 默认 us-east-1 |
-| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | 是（快照） | S3 凭证 |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | 是（S3 导出层，可选） | S3 凭证 |
 
 所有密钥只从环境变量读取，代码里不写、不打印、不落盘。
 InstaCloud 上用 `insta secrets set <NAME>`（值走 stdin）管理。
@@ -86,11 +87,24 @@ insta secrets bind DATABASE_URL postgres/memory --to compute/app
 insta deploy ./app --group app --port 3000
 ```
 
-## 常驻 sandbox 设计要点
+## 常驻 sandbox 设计要点（v2.1：E2B 原生 persistence）
 
-- **get-or-create**：内存 map → `isRunning()` 验证 → DB `user_sandboxes` → `Sandbox.connect` → 失败则 `Sandbox.create`。v1 单用户，`userId` 固定为 `'default'`，多租户时换成真实用户 id 即可。
-- **心跳保活**：每次工具执行成功后 `sbx.setTimeout(3_600_000)`。E2B Hobby 计划 sandbox 上限 1 小时，这是平台限制，不是 bug。
-- **快照恢复**：`tar czf` 工作区 → base64 → S3；恢复时反向操作。快照失败时回收器**不会**杀 sandbox（避免丢数据），下一分钟重试。
+参考 E2B 官方 persistence 文档（sandbox pause & resume / snapshots），三层设计：
+
+- **原生 pause/resume（主路径）**：创建时 `lifecycle: { onTimeout: 'pause', autoResume: true }`
+  （JS SDK 没有顶层 `autoPause` 字段，这是等价写法），超时后自动 pause 而非 kill。
+  空闲 20 分钟回收器调用 `pause()`（默认保留完整内存快照）。paused 的 sandbox
+  不计费、不占并发、可 indefinite 停留；`Sandbox.connect()` 会自动 resume（约 1s）。
+  pause 失败绝不 kill，下分钟重试。执行中的工具（`busy` 标记）不会被 pause。
+- **原生 snapshot 检查点**：每 50 次 tool 执行 `createSnapshot()` 一次，只保留最新一个
+  （旧的 `Sandbox.deleteSnapshot()` 删掉）。sandbox 被彻底删除时，
+  `getSandbox()` 按 DB 里 `snapshot_id` → `Sandbox.create(snapshotId)` 重建。
+  也可手动 `POST /api/sandbox/snapshot`。
+- **S3 导出层（可移植性）**：`exportToS3` / `importFromS3` 把工作区 tar+base64 存 S3，
+  用于跨平台迁移 / 手动备份（`POST /api/sandbox/export`），不在热路径上。
+- **get-or-create**：内存 map → `isRunning()` → paused 则 `connect` 自动 resume →
+  DB `user_sandboxes` → snapshot 恢复 → 全新创建。v1 单用户，`userId` 固定为 `'default'`。
+- **心跳保活**：每次工具执行成功后 `sbx.setTimeout(3_600_000)`。E2B Hobby 计划上限 1 小时。
 - **路径安全**：所有文件读写归一化到 `/home/user/openmuse-work` 下，`..` 逃逸直接拒绝。
 - **降级**：无 `DATABASE_URL` 时工具调用直接返回「云电脑暂不可用（数据库未配置）」，对话本身照常进行。
 

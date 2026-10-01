@@ -53,6 +53,8 @@ async function initDb() {
     last_active_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT now()
   )`);
+  // v2.1: native snapshot checkpoint column
+  await pool.query(`ALTER TABLE user_sandboxes ADD COLUMN IF NOT EXISTS snapshot_id TEXT`);
   console.log('[openmuse] database ready');
 }
 
@@ -244,10 +246,42 @@ app.post('/api/sandbox/snapshot', async (req, res) => {
     });
   }
   try {
-    const r = await sandboxMgr.snapshot('default');
+    // v2.1: E2B 原生 snapshot 检查点
+    const r = await sandboxMgr.createCheckpoint('default');
     res.json(r);
   } catch (e) {
     res.status(500).json({ error: 'snapshot_failed', message: '手动快照失败：' + e.message });
+  }
+});
+
+app.post('/api/sandbox/pause', async (req, res) => {
+  if (!process.env.E2B_API_KEY) {
+    return res.status(503).json({
+      error: 'e2b_not_configured',
+      message: 'E2B_API_KEY 未配置，云电脑不可用。请设置环境变量后重启服务。',
+    });
+  }
+  try {
+    const r = await sandboxMgr.pauseSandbox('default');
+    res.json(r);
+  } catch (e) {
+    res.status(500).json({ error: 'pause_failed', message: '暂停云电脑失败：' + e.message });
+  }
+});
+
+app.post('/api/sandbox/export', async (req, res) => {
+  if (!process.env.E2B_API_KEY) {
+    return res.status(503).json({
+      error: 'e2b_not_configured',
+      message: 'E2B_API_KEY 未配置，云电脑不可用。请设置环境变量后重启服务。',
+    });
+  }
+  try {
+    // S3 导出层（可移植性），主路径已是 E2B 原生 pause/resume + snapshot
+    const r = await sandboxMgr.exportToS3('default');
+    res.json(r);
+  } catch (e) {
+    res.status(500).json({ error: 'export_failed', message: '导出工作区失败：' + e.message });
   }
 });
 

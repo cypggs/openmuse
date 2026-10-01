@@ -265,6 +265,7 @@ async function refreshSandboxStatus(){
     if(!r.ok) throw 0;
     var s=await r.json();
     if(s.status==='active'||s.status==='idle'){dot.className='sdot on';txt.textContent='云电脑：就绪';}
+    else if(s.status==='paused'){dot.className='sdot idle';txt.textContent='云电脑：暂停中（下次使用约1秒恢复）';}
     else if(s.status==='suspended'){dot.className='sdot idle';txt.textContent='云电脑：休眠';}
     else{dot.className='sdot off';txt.textContent='云电脑：未创建';}
   }catch(_){dot.className='sdot off';txt.textContent='云电脑：未知';}
