@@ -12,6 +12,11 @@ const agent = require('./lib/agent');
 const sandboxMgr = require('./lib/sandbox');
 const memory = require('./lib/memory');
 const authLib = require('./lib/auth');
+// P1: artifacts 画布 + 后台任务（Worker B/C 交付，server.js 只做接线）
+const artifacts = require('./lib/artifacts');
+const { registerArtifactRoutes } = require('./lib/artifactRoutes');
+const scheduler = require('./lib/scheduler');
+const { registerTaskRoutes } = require('./lib/taskRoutes');
 
 const PORT = Number(process.env.PORT) || 3000;
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || '';
@@ -28,6 +33,8 @@ if (DATABASE_URL) {
   pool.on('error', (err) => console.error('[openmuse] pg pool error:', err.message));
   sandboxMgr.setPool(pool);
   memory.setPool(pool);
+  artifacts.setPool(pool);
+  scheduler.setPool(pool);
 } else {
   console.warn('[openmuse] DATABASE_URL 未设置：以无持久化模式运行，会话与消息不会保存');
 }
@@ -132,6 +139,10 @@ async function initDb() {
     "createdAt" timestamptz NOT NULL,
     "updatedAt" timestamptz NOT NULL
   )`);
+  // P1: artifacts 画布表（Worker B）
+  await pool.query(artifacts.ARTIFACTS_DDL);
+  // P1: 后台任务表（Worker C；TASKS_DDL 含建表+建索引两条语句，pg 支持多语句一次发送）
+  await pool.query(scheduler.TASKS_DDL);
   console.log('[openmuse] database ready');
 }
 
@@ -229,6 +240,24 @@ app.post('/api/chat', requireDb, requireUser, async (req, res) => {
   if (!message) {
     return res.status(400).json({ error: 'empty_message', message: 'message 不能为空' });
   }
+
+  // P1 后台任务：前端勾选「后台运行」时，只创建 once 任务并立即返回 task_id，
+  // 不走 SSE、不创建聊天 session、不写 messages、不做记忆提取。
+  if (body.background === true) {
+    try {
+      const bgName = Array.from(message).slice(0, 20).join('') || '后台任务';
+      const task = await scheduler.createTask({
+        userId: req.userId,
+        name: bgName,
+        prompt: message,
+        kind: 'once',
+      });
+      return res.json({ task_id: task.id });
+    } catch (e) {
+      return res.status(400).json({ error: 'task_create_failed', message: e.message });
+    }
+  }
+
   if (!DEEPSEEK_API_KEY) {
     return res.status(503).json({
       error: 'llm_not_configured',
@@ -457,6 +486,12 @@ app.delete('/api/memories/:id', requireDb, requireUser, async (req, res) => {
   }
 });
 
+// ---------- artifacts（画布 v1，Worker B）----------
+registerArtifactRoutes(app, { pool, requireUser });
+
+// ---------- 后台任务（Worker C；无 pool 时路由内返回 503）----------
+if (pool) registerTaskRoutes(app, { pool, requireUser });
+
 // ---------- static ----------
 app.use(express.static(path.join(__dirname, 'static')));
 app.get('*', (req, res) => {
@@ -467,6 +502,9 @@ app.get('*', (req, res) => {
 async function boot() {
   // DB (含 better-auth 表) 必须在 listen 之前就绪，否则 /api/auth/* 会因 SCHEMA_MISMATCH 致命崩溃
   await initDb();
+  // P1 后台任务 tick（进程内调度；compute 休眠/缩容到 0 则定时不触发，
+  // 开 always-on 是用户决策，代码层不擅自改）
+  if (pool) await scheduler.startScheduler(pool);
   app.listen(PORT, () => {
     console.log(`[openmuse] listening on :${PORT}`);
   });

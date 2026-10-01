@@ -190,12 +190,39 @@ insta secrets set --service compute/app GOOGLE_CLIENT_SECRET
 insta deploy ./app --group app --port 3000
 ```
 
+## 联网能力（P1）
+
+agent 现在有 `web_search` / `web_read` 两个工具：
+
+- `web_search`：未配 `BRAVE_API_KEY` 时走 DuckDuckGo HTML 解析；配置后改走 Brave Search API（`X-Subscription-Token`）。15s 超时，失败返回中文错误绝不抛错。
+- `web_read`：抓取公网网页正文。带 SSRF 防护（拦 10/8、172.16/12、192.168/16、127/8、`::1`、localhost 及 IPv4-mapped IPv6，含重定向后复检）；只收 `text/html`。
+- system prompt 约定：涉及时效性信息（新闻、版本发布、CVE、价格）或不确定的外部事实时，先搜索再回答，引用给出来源链接。
+
+可选环境变量：`BRAVE_API_KEY`、`WEB_FETCH_TIMEOUT_MS`（默认 15000，仅调优用）。
+
+## Artifacts 画布（P1）
+
+agent 可调 `create_artifact(title, type, content)` / `update_artifact(id, ...)`，type 限 `html | markdown | svg | code`（500KB 上限）。
+
+- 右侧 420px 画布面板（topbar「画布」开关）；创建成功后自动弹出并渲染。
+- 安全红线：html 用 `<iframe sandbox="allow-scripts" srcdoc="…">`，**绝不加 `allow-same-origin`**（opaque origin，iframe JS 触不到父页面）；svg 过滤 `<script>` 与内联事件。
+- 按用户 + session 隔离：`GET /api/artifacts?session_id=`、`GET /api/artifacts/:id`、`DELETE /api/artifacts/:id`，全部 `requireUser`。
+
+## 后台任务与定时（P1）
+
+- composer 勾选「后台运行」发送 → `POST /api/chat {background:true}` → 创建 once 任务立即返回 `{task_id}`，不走 SSE。
+- 任务抽屉（topbar「任务」）：创建「执行一次」或 cron 定时任务（`0 9 * * *` 这类 5 字段表达式），查看结果、立即运行、删除。
+- 调度器每 30s tick：事务内 `SELECT … FOR UPDATE SKIP LOCKED` 抢锁，单 flight 执行；cron 用标准 dom/dow OR 语义。任务以 headless 方式跑一次完整 agent tool loop（**不写 messages、不建 session、不做记忆提取**）。
+- ⚠ **进程内调度依赖实例常驻**：compute 休眠/缩容到 0 则定时不触发。要保证可靠请开 always-on——这是用户决策，代码层不擅自改。
+- cron 按服务器本地时区计算（容器通常是 UTC：`0 9 * * *` 是 UTC 9 点 = 北京时间 17 点，写定时任务时注意换算）。
+- 相关 API（全部 `requireUser`）：`POST /api/tasks`、`GET /api/tasks`、`GET /api/tasks/:id`、`DELETE /api/tasks/:id`、`POST /api/tasks/:id/run`。
+
 ## Roadmap
 
 - [ ] 多模型路由与降级（9Router）、逐条 token/成本展示
 - [ ] 语音输入（whisper-turbo）
 - [ ] noVNC 实时桌面视图（看 agent 操作云电脑）
-- [ ] 自然语言 cron / 主动推送
+- [x] 自然语言 cron / 主动推送（P1：后台任务 + cron 调度已上线；自然语言转 cron 表达式待做）
 - [x] 多用户账号体系（GitHub + Google OAuth 登录，`userId` 按登录用户隔离）
 - [ ] subagents 与 skills 可视化
 

@@ -394,6 +394,12 @@ async function doSend(){
   if(!text||streaming) return;
   if(innerEl.querySelector('.empty')) clearMsgs();
   addUserMsg(text);inputEl.value='';autosize();setBusy(true);
+  // P1 后台运行：勾选时只提交任务，不走 SSE
+  if (window.openmuseTasks && window.openmuseTasks.isBackground()) {
+    await window.openmuseTasks.submitBackground(text);
+    setBusy(false);
+    return;
+  }
   var body=addTyping(), raw='', sid=null, finished=false;
   function scheduleRender(){
     if(renderQueued) return; renderQueued=true;
@@ -425,6 +431,7 @@ async function doSend(){
           if(o.sessionId&&!sid){sid=o.sessionId;currentSessionId=sid;refreshSessions();}
           else if(o.t==='tool_start'){toolStart(body,o);}
           else if(o.t==='tool_end'){toolEnd(body,o);}
+          else if(o.t==='artifact'){window.dispatchEvent(new CustomEvent('openmuse:artifact',{detail:o}));}
           else if(o.token){raw+=o.token;scheduleRender();}
           else if(o.error){body.closest('.msg').remove();addErrorMsg(o.error);finished=true;}
         }catch(_){}
@@ -483,5 +490,8 @@ function renderUserChip(user){
 showEmpty();bootAuth();refreshSessions();refreshSandboxStatus();autosize();
 setInterval(refreshSandboxStatus,60000);
 </script>
+<!-- P1: artifacts 画布面板 + 后台任务面板（Worker B/C 自包含脚本） -->
+<script src="/artifact-panel.js"></script>
+<script src="/task-panel.js"></script>
 </body>
 </html>
