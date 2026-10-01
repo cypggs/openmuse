@@ -464,7 +464,14 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'static', 'index.html'));
 });
 
-app.listen(PORT, () => {
-  console.log(`[openmuse] listening on :${PORT}`);
-  initDb().catch((e) => console.error('[openmuse] db init failed (non-fatal):', e.message));
+async function boot() {
+  // DB (含 better-auth 表) 必须在 listen 之前就绪，否则 /api/auth/* 会因 SCHEMA_MISMATCH 致命崩溃
+  await initDb();
+  app.listen(PORT, () => {
+    console.log(`[openmuse] listening on :${PORT}`);
+  });
+}
+boot().catch((e) => {
+  console.error('[openmuse] boot failed:', e.message);
+  process.exit(1);
 });
