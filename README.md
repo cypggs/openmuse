@@ -40,6 +40,8 @@ snapshot 检查点保证状态跨会话保留，约 1 秒恢复。
 - **Agent tool loop**：模型自主决定调 `sandbox_exec / sandbox_run_python / sandbox_read_file / sandbox_write_file`，最多 8 轮；前端把工具调用渲染成可折叠的时间线卡片
 - **工作区持久化**：空闲 20 分钟 E2B 原生 `pause()`（保留内存），下次使用约 1 秒自动 resume；每 50 次操作原生 `snapshot` 检查点；也可手动 `POST /api/sandbox/snapshot` / `POST /api/sandbox/pause`
 - **会话记忆**：Postgres 存 sessions/messages，侧边栏切换历史
+- **长期记忆**：对话后自动提取 fact/preference/project/relationship/decision，
+  注入 system prompt；侧边栏可折叠面板查看 + 单条删除（见下文「长期记忆」）
 - **状态可见**：侧边栏小圆点显示云电脑「就绪 / 暂停中 / 休眠 / 未配置」
 
 ## 环境变量
@@ -107,6 +109,27 @@ insta deploy ./app --group app --port 3000
 - **心跳保活**：每次工具执行成功后 `sbx.setTimeout(3_600_000)`。E2B Hobby 计划上限 1 小时。
 - **路径安全**：所有文件读写归一化到 `/home/user/openmuse-work` 下，`..` 逃逸直接拒绝。
 - **降级**：无 `DATABASE_URL` 时工具调用直接返回「云电脑暂不可用（数据库未配置）」，对话本身照常进行。
+
+## 长期记忆（v1.1）
+
+每用户跨会话的长期记忆，让 agent 越用越了解你。v1 不引入向量依赖：
+
+- **存储**：`memories` 表 `(id, user_id, type, content, importance, created_at, updated_at)`，
+  type 取值 `fact / preference / project / relationship / decision`，
+  索引 `(user_id, importance DESC, updated_at DESC)`。
+- **提取时机**：`/api/chat` 的 SSE `[DONE]` 发送后 fire-and-forget 触发。
+  条件：本 session 用户消息 ≥ 2 条且最后一条用户消息长度 > 15（过滤寒暄噪音）。
+  用便宜的 `deepseek-chat`（`temperature: 0.3`）做提取，prompt 要求只返回 JSON 数组
+  `[{type, content, importance(1-5)}]`；content ≤ 8 字符的条目丢弃。
+- **去重**：写入前查该用户已有记忆，新 content 与已有某条互相包含（任一方向）时
+  UPDATE 那条（content 取两者较长、importance 取 max、updated_at=now），否则 INSERT。
+  提取/写入的异常全部吞掉只打日志，绝不影响主对话。
+- **检索**：下次 `/api/chat` 的 system prompt 注入 `<长期记忆>` 块，
+  每条 `- [type] content`；无记忆时不注入。v1 按 importance + 时间排序。
+- **管理**：前端侧边栏可折叠「🧠 长期记忆」面板，查看 + 单条删除
+  （`GET /api/memories`、`DELETE /api/memories/:id`，只能删自己的 `userId`）。
+- **v2 计划**：pgvector 语义检索（按当前对话 embedding 召回相关记忆），
+  以及记忆合并/过期（低 importance 长时间未命中自动衰减）。
 
 ## Roadmap
 

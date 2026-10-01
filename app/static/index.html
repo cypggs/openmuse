@@ -32,6 +32,19 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:15
 .sess:hover .del{opacity:1}
 .sess .del:hover{color:var(--danger);background:rgba(242,109,109,.12)}
 .sidefoot{padding:12px 18px;border-top:1px solid var(--border);font-size:11.5px;color:var(--muted2)}
+/* long-term memory panel */
+.memwrap{border-top:1px solid var(--border);padding:6px 10px 10px}
+.memhead{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:10px;cursor:pointer;font-size:13.5px;color:var(--muted);transition:.15s;user-select:none}
+.memhead:hover{background:var(--panel2);color:var(--text)}
+.memtoggle{color:var(--muted2);font-size:12px}
+.memlist{max-height:250px;overflow-y:auto;padding-bottom:4px}
+.mem{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;font-size:12.5px;color:var(--muted);line-height:1.5}
+.mem:hover{background:var(--panel2);color:var(--text)}
+.mem .mt{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mem .mdel{opacity:0;flex-shrink:0;width:22px;height:22px;border:none;border-radius:6px;background:transparent;color:var(--muted2);cursor:pointer;font-size:14px;line-height:1}
+.mem:hover .mdel{opacity:1}
+.mem .mdel:hover{color:var(--danger);background:rgba(242,109,109,.12)}
+.memempty{font-size:12px;color:var(--muted2);padding:6px 10px}
 .overlay{display:none}
 /* ---------- main ---------- */
 .main{flex:1;display:flex;flex-direction:column;min-width:0}
@@ -126,6 +139,10 @@ textarea::placeholder{color:var(--muted2)}
     <div class="brand"><h1>openmuse</h1><p>青出于蓝</p></div>
     <button class="newchat" id="newChat">＋ 新的对话</button>
     <div class="sessions" id="sessions"></div>
+    <div class="memwrap">
+      <div class="memhead" id="memHead"><span>🧠 长期记忆</span><span class="memtoggle" id="memToggle">▸</span></div>
+      <div class="memlist" id="memList" style="display:none"></div>
+    </div>
     <div class="sidefoot">
       <div class="sbstatus"><span class="sdot" id="sbDot"></span><span id="sbText">云电脑：检查中…</span></div>
       <div>由 InstaCloud 驱动 · v2</div>
@@ -293,6 +310,36 @@ innerEl.addEventListener('click',function(e){
     ta.select();try{document.execCommand('copy');}catch(_){/*noop*/}document.body.removeChild(ta);done();
   }
 });
+/* ---------- long-term memory panel ---------- */
+var memOpen=false;
+async function refreshMemories(){
+  var list=$('memList');
+  try{
+    var r=await fetch('/api/memories'); if(!r.ok) throw 0;
+    var mems=await r.json();
+    list.innerHTML='';
+    if(!mems.length){list.innerHTML='<div class="memempty">暂无长期记忆</div>';return;}
+    mems.forEach(function(m){
+      var d=document.createElement('div');d.className='mem';
+      var t=document.createElement('span');t.className='mt';
+      t.textContent='['+m.type+'] '+m.content;t.title=t.textContent;
+      var del=document.createElement('button');del.className='mdel';del.textContent='×';del.title='删除这条记忆';
+      del.addEventListener('click',function(ev){ev.stopPropagation();deleteMemory(m.id);});
+      d.appendChild(t);d.appendChild(del);list.appendChild(d);
+    });
+  }catch(_){list.innerHTML='<div class="memempty">加载失败</div>';}
+}
+async function deleteMemory(id){
+  if(!confirm('确定删除这条长期记忆吗？')) return;
+  await fetch('/api/memories/'+encodeURIComponent(id),{method:'DELETE'});
+  refreshMemories();
+}
+$('memHead').addEventListener('click',function(){
+  memOpen=!memOpen;
+  $('memList').style.display=memOpen?'block':'none';
+  $('memToggle').textContent=memOpen?'▾':'▸';
+  if(memOpen) refreshMemories();
+});
 /* ---------- sessions ---------- */
 async function refreshSessions(){
   try{
@@ -386,6 +433,7 @@ async function doSend(){
     addErrorMsg('网络错误：'+e.message);
   }
   setBusy(false);autoscroll();
+  if(memOpen) refreshMemories();
 }
 /* ---------- composer ---------- */
 function autosize(){inputEl.style.height='auto';inputEl.style.height=Math.min(inputEl.scrollHeight,160)+'px';}

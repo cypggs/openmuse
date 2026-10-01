@@ -9,6 +9,7 @@ const crypto = require('crypto');
 const { Pool } = require('pg');
 const agent = require('./lib/agent');
 const sandboxMgr = require('./lib/sandbox');
+const memory = require('./lib/memory');
 
 const PORT = Number(process.env.PORT) || 3000;
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || '';
@@ -27,6 +28,7 @@ if (DATABASE_URL) {
   });
   pool.on('error', (err) => console.error('[openmuse] pg pool error:', err.message));
   sandboxMgr.setPool(pool);
+  memory.setPool(pool);
 } else {
   console.warn('[openmuse] DATABASE_URL 未设置：以无持久化模式运行，会话与消息不会保存');
 }
@@ -55,6 +57,19 @@ async function initDb() {
   )`);
   // v2.1: native snapshot checkpoint column
   await pool.query(`ALTER TABLE user_sandboxes ADD COLUMN IF NOT EXISTS snapshot_id TEXT`);
+  // v1.1: 长期记忆
+  await pool.query(`CREATE TABLE IF NOT EXISTS memories (
+    id SERIAL PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    importance INT DEFAULT 3,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+  )`);
+  await pool.query(
+    `CREATE INDEX IF NOT EXISTS memories_user_importance_idx ON memories (user_id, importance DESC, updated_at DESC)`
+  );
   console.log('[openmuse] database ready');
 }
 
@@ -180,12 +195,28 @@ app.post('/api/chat', requireDb, async (req, res) => {
       clientGone = true;
     });
 
+    // v1.1: 长期记忆注入 system prompt（无记忆时不注入该块）
+    let systemExtra = '';
+    try {
+      const mems = await memory.getMemories('default', 20);
+      const block = memory.formatMemoryBlock(mems);
+      if (block) {
+        systemExtra =
+          '\n\n<长期记忆>\n以下是关于这位用户的长期记忆，可在回答中自然参考，不要逐字复述，除非用户问起：\n' +
+          block +
+          '\n</长期记忆>';
+      }
+    } catch (e) {
+      console.error('[openmuse] get memories failed:', e.message);
+    }
+
     let full = '';
     try {
       const r = await agent.runAgent({
         userId: 'default', // v1: single user
         sessionId,
         history,
+        systemExtra,
         onEvent: (e) => {
           if (!clientGone) send(e);
         },
@@ -209,6 +240,24 @@ app.post('/api/chat', requireDb, async (req, res) => {
     }
     if (!clientGone) res.write('data: [DONE]\n\n');
     res.end();
+
+    // v1.1: 长期记忆提取（fire-and-forget，异常只打日志）
+    // 条件：本 session 用户消息>=2 条且最后一条用户消息长度>15，避免噪音
+    if (full && DEEPSEEK_API_KEY) {
+      try {
+        const userMsgs = history.filter((m) => m.role === 'user');
+        const lastUser = userMsgs[userMsgs.length - 1];
+        const lastLen = lastUser ? String(lastUser.content || '').length : 0;
+        if (userMsgs.length >= 2 && lastLen > 15) {
+          const recent = [...history.slice(-11), { role: 'assistant', content: full }];
+          memory.extractMemories('default', recent).catch((e) => {
+            console.error('[openmuse] memory extraction error:', e && e.message);
+          });
+        }
+      } catch (e) {
+        console.error('[openmuse] memory extraction error:', e && e.message);
+      }
+    }
   } catch (e) {
     console.error('[openmuse] /api/chat failed:', e.message);
     if (!res.headersSent) {
@@ -282,6 +331,25 @@ app.post('/api/sandbox/export', async (req, res) => {
     res.json(r);
   } catch (e) {
     res.status(500).json({ error: 'export_failed', message: '导出工作区失败：' + e.message });
+  }
+});
+
+// ---------- memories (长期记忆 v1.1) ----------
+app.get('/api/memories', requireDb, async (req, res) => {
+  try {
+    res.json(await memory.listMemories('default'));
+  } catch (e) {
+    res.status(500).json({ error: 'db_error', message: e.message });
+  }
+});
+
+app.delete('/api/memories/:id', requireDb, async (req, res) => {
+  try {
+    const n = await memory.deleteMemory('default', req.params.id);
+    if (!n) return res.status(404).json({ error: 'not_found', message: '记忆不存在' });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: 'db_error', message: e.message });
   }
 });
 

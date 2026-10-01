@@ -249,7 +249,7 @@ async function streamChat(messages, onToken) {
   return { content, toolCalls };
 }
 
-async function runAgent({ userId, sessionId, history, onEvent }) {
+async function runAgent({ userId, sessionId, history, onEvent, systemExtra }) {
   const emit = (e) => {
     try {
       if (onEvent) onEvent(e);
@@ -260,7 +260,8 @@ async function runAgent({ userId, sessionId, history, onEvent }) {
     return { content: '' };
   }
 
-  const messages = [{ role: 'system', content: SYSTEM_PROMPT }, ...(history || [])];
+  const systemContent = SYSTEM_PROMPT + (typeof systemExtra === 'string' ? systemExtra : '');
+  const messages = [{ role: 'system', content: systemContent }, ...(history || [])];
   let fullText = '';
 
   for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
