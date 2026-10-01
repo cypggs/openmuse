@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>openmuse · 青出于蓝</title>
+<style>
+:root{
+  --bg:#0b0e14; --bg2:#0e1219; --panel:#11161f; --panel2:#151b26;
+  --border:rgba(255,255,255,.08); --text:#e8ebf2; --muted:#8b93a7; --muted2:#5c6478;
+  --accent:#7c6cf6; --accent2:#38e1c6; --danger:#f26d6d;
+  --radius:14px; --font:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:15px;line-height:1.7;overflow:hidden}
+.app{display:flex;height:100dvh}
+/* ---------- sidebar ---------- */
+.sidebar{width:280px;flex-shrink:0;background:var(--bg2);border-right:1px solid var(--border);display:flex;flex-direction:column;z-index:20}
+.brand{padding:20px 18px 14px}
+.brand h1{font-size:22px;font-weight:700;letter-spacing:.5px;background:linear-gradient(100deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
+.brand p{font-size:12px;color:var(--muted);margin-top:2px;letter-spacing:2px}
+.newchat{margin:4px 14px 12px;padding:11px;border:1px solid var(--border);border-radius:12px;background:var(--panel2);color:var(--text);font-size:14px;cursor:pointer;transition:.18s;display:flex;align-items:center;justify-content:center;gap:8px}
+.newchat:hover{border-color:var(--accent);background:#1a2130}
+.sessions{flex:1;overflow-y:auto;padding:0 10px 14px}
+.sess{display:flex;align-items:center;gap:8px;padding:10px 12px;border-radius:10px;cursor:pointer;color:var(--muted);font-size:13.5px;transition:.15s;border:1px solid transparent}
+.sess:hover{background:var(--panel2);color:var(--text)}
+.sess.active{background:var(--panel2);color:var(--text);border-color:var(--border)}
+.sess .t{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sess .del{opacity:0;flex-shrink:0;width:24px;height:24px;border:none;border-radius:6px;background:transparent;color:var(--muted2);cursor:pointer;font-size:15px;line-height:1}
+.sess:hover .del{opacity:1}
+.sess .del:hover{color:var(--danger);background:rgba(242,109,109,.12)}
+.sidefoot{padding:12px 18px;border-top:1px solid var(--border);font-size:11.5px;color:var(--muted2)}
+.overlay{display:none}
+/* ---------- main ---------- */
+.main{flex:1;display:flex;flex-direction:column;min-width:0}
+.topbar{display:flex;align-items:center;gap:10px;padding:12px 18px;border-bottom:1px solid var(--border);background:rgba(11,14,20,.85);backdrop-filter:blur(8px)}
+.menubtn{display:none;border:1px solid var(--border);background:var(--panel);color:var(--text);border-radius:9px;width:36px;height:36px;font-size:17px;cursor:pointer}
+.topbar .tt{font-size:14px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.topbar .dot{width:8px;height:8px;border-radius:50%;background:#3ddc84;flex-shrink:0;box-shadow:0 0 8px #3ddc84}
+.msgs{flex:1;overflow-y:auto;padding:28px 0 20px;scroll-behavior:smooth}
+.inner{max-width:780px;margin:0 auto;padding:0 22px}
+.msg{margin-bottom:22px;animation:fadein .25s ease}
+@keyframes fadein{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.msg.user{display:flex;justify-content:flex-end}
+.msg.user .bub{background:linear-gradient(135deg,#5b4fd6,#6f5df0);color:#fff;padding:10px 16px;border-radius:16px 16px 4px 16px;max-width:82%;white-space:pre-wrap;word-break:break-word}
+.msg.ai .who{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.msg.ai .ava{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;color:#0b0e14}
+.msg.ai .who span{font-size:12.5px;color:var(--muted)}
+.msg.ai .body{color:var(--text);word-break:break-word}
+.msg.ai .body p{margin:0 0 12px}
+.msg.ai .body p:last-child{margin-bottom:0}
+.msg.ai .body h2,.msg.ai .body h3,.msg.ai .body h4{margin:18px 0 8px;line-height:1.4}
+.msg.ai .body ul,.msg.ai .body ol{margin:0 0 12px 20px}
+.msg.ai .body li{margin:4px 0}
+.msg.ai .body blockquote{border-left:3px solid var(--accent);padding:4px 12px;margin:0 0 12px;color:var(--muted);background:rgba(124,108,246,.06);border-radius:0 8px 8px 0}
+.msg.ai .body a{color:var(--accent2)}
+code.ic{background:rgba(255,255,255,.09);padding:2px 7px;border-radius:6px;font-family:var(--mono);font-size:13px}
+.codeblock{margin:12px 0;border:1px solid var(--border);border-radius:12px;overflow:hidden;background:#0a0d13}
+.codehead{display:flex;align-items:center;justify-content:space-between;padding:7px 12px;background:rgba(255,255,255,.03);border-bottom:1px solid var(--border);font-size:12px;color:var(--muted)}
+.copybtn{border:1px solid var(--border);background:transparent;color:var(--muted);border-radius:7px;padding:3px 10px;font-size:12px;cursor:pointer;transition:.15s}
+.copybtn:hover{color:var(--text);border-color:var(--accent)}
+.codeblock pre{padding:14px;overflow-x:auto}
+.codeblock code{font-family:var(--mono);font-size:13px;line-height:1.65;color:#d5dbe8;background:none;padding:0}
+.msg.err .bub{background:rgba(242,109,109,.1);border:1px solid rgba(242,109,109,.35);color:#ffb4b4;padding:10px 16px;border-radius:12px;max-width:100%}
+.typing{display:inline-flex;gap:5px;padding:6px 0}
+.typing i{width:7px;height:7px;border-radius:50%;background:var(--muted);animation:tp 1.1s infinite}
+.typing i:nth-child(2){animation-delay:.18s}.typing i:nth-child(3){animation-delay:.36s}
+@keyframes tp{0%,60%,100%{opacity:.25;transform:none}30%{opacity:1;transform:translateY(-4px)}}
+/* empty state */
+.empty{text-align:center;padding:9vh 20px 30px}
+.empty .logo{font-size:44px;font-weight:800;letter-spacing:1px;background:linear-gradient(100deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
+.empty .sub{color:var(--muted);letter-spacing:6px;font-size:13px;margin:8px 0 26px}
+.empty .hi{color:var(--muted);font-size:14px;max-width:520px;margin:0 auto 24px;line-height:1.9}
+.chips{display:flex;flex-wrap:wrap;gap:10px;justify-content:center}
+.chip{border:1px solid var(--border);background:var(--panel);color:var(--text);border-radius:20px;padding:8px 16px;font-size:13px;cursor:pointer;transition:.15s}
+.chip:hover{border-color:var(--accent);background:var(--panel2)}
+/* composer */
+.composer{padding:14px 0 calc(16px + env(safe-area-inset-bottom));background:linear-gradient(transparent,var(--bg) 30%)}
+.box{max-width:780px;margin:0 auto;padding:0 22px}
+.bar{display:flex;align-items:flex-end;gap:10px;background:var(--panel);border:1px solid var(--border);border-radius:18px;padding:10px 10px 10px 16px;transition:.18s}
+.bar:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px rgba(124,108,246,.15)}
+textarea{flex:1;background:transparent;border:none;outline:none;color:var(--text);font-family:var(--font);font-size:15px;line-height:1.6;resize:none;max-height:160px;padding:6px 0}
+textarea::placeholder{color:var(--muted2)}
+.sendbtn{flex-shrink:0;width:40px;height:40px;border:none;border-radius:12px;background:linear-gradient(135deg,var(--accent),#5a8df0);color:#fff;font-size:17px;cursor:pointer;transition:.15s;display:flex;align-items:center;justify-content:center}
+.sendbtn:hover:not(:disabled){transform:translateY(-1px);box-shadow:0 4px 14px rgba(124,108,246,.4)}
+.sendbtn:disabled{opacity:.45;cursor:default}
+.hint{text-align:center;font-size:11.5px;color:var(--muted2);margin-top:8px}
+/* tool timeline cards (agent sandbox) */
+.tools{margin:2px 0 6px}
+.toolcard{border:1px solid var(--border);border-radius:10px;background:rgba(255,255,255,.02);margin:8px 0;overflow:hidden}
+.toolhead{display:flex;align-items:center;gap:8px;padding:7px 10px;cursor:pointer;user-select:none}
+.tdot{width:8px;height:8px;border-radius:50%;flex-shrink:0;background:var(--muted)}
+.tdot.run{background:#f5b942;box-shadow:0 0 6px #f5b942;animation:tp 1.1s infinite}
+.tdot.ok{background:#3ddc84;box-shadow:0 0 6px #3ddc84}
+.tdot.fail{background:var(--danger);box-shadow:0 0 6px var(--danger)}
+.tlabel{flex:1;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--mono);font-size:12.5px}
+.ttoggle{border:none;background:transparent;color:var(--muted2);cursor:pointer;font-size:12px;padding:2px 6px}
+.tpreview pre{padding:0 10px 8px;margin:0;font-family:var(--mono);font-size:12px;color:var(--muted);white-space:pre-wrap;word-break:break-all}
+.tbody pre{padding:8px 10px;margin:0;border-top:1px solid var(--border);font-family:var(--mono);font-size:12px;color:#c9d2e3;white-space:pre-wrap;word-break:break-all;max-height:260px;overflow-y:auto}
+/* sandbox status */
+.sbstatus{display:flex;align-items:center;gap:7px;margin-bottom:6px}
+.sdot{width:8px;height:8px;border-radius:50%;background:var(--muted2);flex-shrink:0}
+.sdot.on{background:#3ddc84;box-shadow:0 0 6px #3ddc84}
+.sdot.idle{background:#f5b942;box-shadow:0 0 6px #f5b942}
+.sdot.off{background:var(--muted2)}
+/* mobile */
+@media (max-width:768px){
+  .sidebar{position:fixed;left:0;top:0;bottom:0;transform:translateX(-105%);transition:transform .25s ease;box-shadow:20px 0 50px rgba(0,0,0,.5)}
+  .sidebar.open{transform:none}
+  .overlay.show{display:block;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:15}
+  .menubtn{display:block}
+  .msgs{padding-top:18px}
+  .msg.user .bub{max-width:88%}
+}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border-radius:4px}
+::-webkit-scrollbar-track{background:transparent}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="overlay" id="overlay"></div>
+  <aside class="sidebar" id="sidebar">
+    <div class="brand"><h1>openmuse</h1><p>青出于蓝</p></div>
+    <button class="newchat" id="newChat">＋ 新的对话</button>
+    <div class="sessions" id="sessions"></div>
+    <div class="sidefoot">
+      <div class="sbstatus"><span class="sdot" id="sbDot"></span><span id="sbText">云电脑：检查中…</span></div>
+      <div>由 InstaCloud 驱动 · v2</div>
+    </div>
+  </aside>
+  <div class="main">
+    <div class="topbar">
+      <button class="menubtn" id="menuBtn">☰</button>
+      <div class="dot"></div>
+      <div class="tt" id="topTitle">新的对话</div>
+    </div>
+    <div class="msgs" id="msgs"><div class="inner" id="inner"></div></div>
+    <div class="composer"><div class="box">
+      <div class="bar">
+        <textarea id="input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行…"></textarea>
+        <button class="sendbtn" id="sendBtn" title="发送">➤</button>
+      </div>
+      <div class="hint">openmuse 处于早期预览阶段，回答仅供参考</div>
+    </div></div>
+  </div>
+</div>
+<script>
+'use strict';
+/* ---------- tiny markdown renderer (offline-safe, XSS-safe) ---------- */
+function escapeHtml(s){return s.replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
+function renderMarkdown(src){
+  var blocks=[];
+  var text=src.replace(/```(\w*)\n([\s\S]*?)(```|$)/g,function(m,lang,code){
+    blocks.push({lang:lang||'code',code:code.replace(/\n+$/,'')});
+    return '\u0000CODE'+(blocks.length-1)+'\u0000';
+  });
+  var html=escapeHtml(text);
+  html=html
+    .replace(/^### (.*)$/gm,'<h4>$1</h4>')
+    .replace(/^## (.*)$/gm,'<h3>$1</h3>')
+    .replace(/^# (.*)$/gm,'<h2>$1</h2>')
+    .replace(/^&gt; ?(.*)$/gm,'<blockquote>$1</blockquote>')
+    .replace(/`([^`\n]+)`/g,'<code class="ic">$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g,'<strong>$1</strong>')
+    .replace(/(^|[^*\w])\*([^*\n]+)\*/g,'$1<em>$2</em>')
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
+  html=html.replace(/((?:^[ \t]*[-*] .*(?:\n|$))+)/gm,function(m){
+    var items=m.trim().split('\n').map(function(l){return '<li>'+l.replace(/^[ \t]*[-*] /,'')+'</li>';}).join('');
+    return '<ul>'+items+'</ul>';
+  });
+  html=html.replace(/((?:^[ \t]*\d+\. .*(?:\n|$))+)/gm,function(m){
+    var items=m.trim().split('\n').map(function(l){return '<li>'+l.replace(/^[ \t]*\d+\. /,'')+'</li>';}).join('');
+    return '<ol>'+items+'</ol>';
+  });
+  html=html.split(/\n{2,}/).map(function(p){
+    p=p.trim(); if(!p) return '';
+    if(/^<(h2|h3|h4|blockquote|ul|ol)/.test(p)) return p;
+    return '<p>'+p.replace(/\n/g,'<br>')+'</p>';
+  }).join('');
+  html=html.replace(/\u0000CODE(\d+)\u0000/g,function(m,i){
+    var b=blocks[+i]; if(!b) return '';
+    return '<div class="codeblock"><div class="codehead"><span>'+escapeHtml(b.lang)+
+      '</span><button class="copybtn" data-code="'+encodeURIComponent(b.code)+'">复制</button></div>'+
+      '<pre><code>'+escapeHtml(b.code)+'</code></pre></div>';
+  });
+  return html;
+}
+/* ---------- state & dom ---------- */
+var $=function(id){return document.getElementById(id);};
+var msgsEl=$('msgs'), innerEl=$('inner'), inputEl=$('input'), sendBtn=$('sendBtn');
+var sessionsEl=$('sessions'), topTitle=$('topTitle');
+var currentSessionId=null, streaming=false, renderQueued=false;
+
+function nearBottom(){return msgsEl.scrollHeight-msgsEl.scrollTop-msgsEl.clientHeight<90;}
+function scrollBottom(){msgsEl.scrollTop=msgsEl.scrollHeight;}
+function autoscroll(){if(nearBottom()) scrollBottom();}
+
+function showEmpty(){
+  innerEl.innerHTML=
+   '<div class="empty"><div class="logo">openmuse</div><div class="sub">青出于蓝</div>'+
+   '<div class="hi">你好，我是 openmuse —— 运行在 InstaCloud 上的开源 AI 助手。<br>问我技术问题、聊聊想法，或者让我帮你写点代码。</div>'+
+   '<div class="chips">'+
+   '<button class="chip" data-q="用一句话介绍你自己">介绍一下你自己</button>'+
+   '<button class="chip" data-q="解释一下什么是 Serverless，越通俗越好">什么是 Serverless？</button>'+
+   '<button class="chip" data-q="写一个 Python 快速排序，并解释时间复杂度">写个快速排序</button>'+
+   '</div></div>';
+  innerEl.querySelectorAll('.chip').forEach(function(c){
+    c.addEventListener('click',function(){inputEl.value=c.getAttribute('data-q');doSend();});
+  });
+}
+function clearMsgs(){innerEl.innerHTML='';}
+
+function addUserMsg(text){
+  var d=document.createElement('div');d.className='msg user';
+  var b=document.createElement('div');b.className='bub';b.textContent=text;
+  d.appendChild(b);innerEl.appendChild(d);autoscroll();
+}
+function addAiMsg(){
+  var d=document.createElement('div');d.className='msg ai';
+  d.innerHTML='<div class="who"><div class="ava">μ</div><span>openmuse</span></div>'+
+    '<div class="body"><div class="tools"></div><div class="txt"></div></div>';
+  innerEl.appendChild(d);autoscroll();
+  return d.querySelector('.body');
+}
+function aiTxt(bodyEl){return bodyEl.querySelector('.txt');}
+/* tool timeline cards */
+function toggleToolCard(card){
+  var b=card.querySelector('.tbody'), t=card.querySelector('.ttoggle');
+  var open=b.style.display!=='none';
+  b.style.display=open?'none':'block'; t.textContent=open?'▸':'▾';
+}
+function toolStart(bodyEl,o){
+  var tools=bodyEl.querySelector('.tools'); if(!tools) return;
+  var d=document.createElement('div');d.className='toolcard';d.id='tc_'+o.id;
+  d.innerHTML='<div class="toolhead"><span class="tdot run"></span><span class="tlabel"></span>'+
+    '<button class="ttoggle" title="展开/折叠">▸</button></div>'+
+    '<div class="tpreview" style="display:none"><pre></pre></div>'+
+    '<div class="tbody" style="display:none"><pre></pre></div>';
+  d.querySelector('.tlabel').textContent='🖥 '+(o.label||'执行工具');
+  var head=d.querySelector('.toolhead');
+  head.addEventListener('click',function(){toggleToolCard(d);});
+  tools.appendChild(d);autoscroll();
+}
+function toolEnd(bodyEl,o){
+  var d=document.getElementById('tc_'+o.id); if(!d) return;
+  var dot=d.querySelector('.tdot');
+  dot.className='tdot '+(o.ok?'ok':'fail');
+  var out=o.output||'(无输出)';
+  d.querySelector('.tbody pre').textContent=out;
+  var lines=out.split('\n');
+  var prev=d.querySelector('.tpreview');
+  prev.querySelector('pre').textContent=lines.slice(0,3).join('\n')+(lines.length>3?'\n…':'');
+  prev.style.display='block';
+  autoscroll();
+}
+/* sandbox status */
+async function refreshSandboxStatus(){
+  var dot=$('sbDot'),txt=$('sbText');
+  try{
+    var r=await fetch('/api/sandbox/status');
+    if(r.status===503){dot.className='sdot off';txt.textContent='云电脑：未配置';return;}
+    if(!r.ok) throw 0;
+    var s=await r.json();
+    if(s.status==='active'||s.status==='idle'){dot.className='sdot on';txt.textContent='云电脑：就绪';}
+    else if(s.status==='suspended'){dot.className='sdot idle';txt.textContent='云电脑：休眠';}
+    else{dot.className='sdot off';txt.textContent='云电脑：未创建';}
+  }catch(_){dot.className='sdot off';txt.textContent='云电脑：未知';}
+}
+function addErrorMsg(text){
+  var d=document.createElement('div');d.className='msg err';
+  var b=document.createElement('div');b.className='bub';b.textContent='⚠ '+text;
+  d.appendChild(b);innerEl.appendChild(d);autoscroll();
+}
+function addTyping(){
+  var body=addAiMsg();
+  aiTxt(body).innerHTML='<span class="typing"><i></i><i></i><i></i></span>';
+  return body;
+}
+/* code copy (event delegation) */
+innerEl.addEventListener('click',function(e){
+  var btn=e.target.closest('.copybtn'); if(!btn) return;
+  var code=decodeURIComponent(btn.getAttribute('data-code'));
+  function done(){btn.textContent='已复制';setTimeout(function(){btn.textContent='复制';},1500);}
+  if(navigator.clipboard&&navigator.clipboard.writeText){
+    navigator.clipboard.writeText(code).then(done).catch(function(){fallback();});
+  }else fallback();
+  function fallback(){
+    var ta=document.createElement('textarea');ta.value=code;document.body.appendChild(ta);
+    ta.select();try{document.execCommand('copy');}catch(_){/*noop*/}document.body.removeChild(ta);done();
+  }
+});
+/* ---------- sessions ---------- */
+async function refreshSessions(){
+  try{
+    var r=await fetch('/api/sessions'); if(!r.ok) return;
+    var list=await r.json();
+    sessionsEl.innerHTML='';
+    list.forEach(function(s){
+      var d=document.createElement('div');
+      d.className='sess'+(s.id===currentSessionId?' active':'');
+      var t=document.createElement('span');t.className='t';t.textContent=s.title||'新的对话';t.title=t.textContent;
+      var del=document.createElement('button');del.className='del';del.textContent='×';del.title='删除';
+      del.addEventListener('click',function(ev){ev.stopPropagation();deleteSession(s.id);});
+      d.appendChild(t);d.appendChild(del);
+      d.addEventListener('click',function(){openSession(s.id,s.title||'新的对话');closeSidebar();});
+      sessionsEl.appendChild(d);
+    });
+  }catch(_){/* offline */}
+}
+async function deleteSession(id){
+  if(!confirm('确定删除这个对话吗？')) return;
+  await fetch('/api/sessions/'+encodeURIComponent(id),{method:'DELETE'});
+  if(id===currentSessionId){currentSessionId=null;topTitle.textContent='新的对话';clearMsgs();showEmpty();}
+  refreshSessions();
+}
+async function openSession(id,title){
+  currentSessionId=id;topTitle.textContent=title;clearMsgs();refreshSessions();
+  try{
+    var r=await fetch('/api/sessions/'+encodeURIComponent(id)+'/messages');
+    var list=await r.json();
+    if(!list.length){showEmpty();return;}
+    list.forEach(function(m){
+      if(m.role==='user') addUserMsg(m.content);
+      else{var body=addAiMsg();aiTxt(body).innerHTML=renderMarkdown(m.content);}
+    });
+    scrollBottom();
+  }catch(_){addErrorMsg('加载历史消息失败');}
+}
+function newChat(){
+  currentSessionId=null;topTitle.textContent='新的对话';
+  clearMsgs();showEmpty();refreshSessions();closeSidebar();inputEl.focus();
+}
+/* ---------- send (SSE) ---------- */
+function setBusy(b){streaming=b;sendBtn.disabled=b;}
+async function doSend(){
+  var text=inputEl.value.trim();
+  if(!text||streaming) return;
+  if(innerEl.querySelector('.empty')) clearMsgs();
+  addUserMsg(text);inputEl.value='';autosize();setBusy(true);
+  var body=addTyping(), raw='', sid=null, finished=false;
+  function scheduleRender(){
+    if(renderQueued) return; renderQueued=true;
+    setTimeout(function(){renderQueued=false;aiTxt(body).innerHTML=renderMarkdown(raw);autoscroll();},40);
+  }
+  try{
+    var res=await fetch('/api/chat',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({sessionId:currentSessionId,message:text})
+    });
+    if(!res.ok){
+      var err=await res.json().catch(function(){return {message:'请求失败（'+res.status+'）'};});
+      body.closest('.msg').remove();
+      addErrorMsg(err.message||'请求失败');
+      setBusy(false);return;
+    }
+    var reader=res.body.getReader(), decoder=new TextDecoder(), buf='';
+    for(;;){
+      var step=await reader.read(); if(step.done) break;
+      buf+=decoder.decode(step.value,{stream:true});
+      var idx;
+      while((idx=buf.indexOf('\n'))>=0){
+        var line=buf.slice(0,idx).trim(); buf=buf.slice(idx+1);
+        if(line.indexOf('data:')!==0) continue;
+        var p=line.slice(5).trim();
+        if(p==='[DONE]'){finished=true;break;}
+        try{
+          var o=JSON.parse(p);
+          if(o.sessionId&&!sid){sid=o.sessionId;currentSessionId=sid;refreshSessions();}
+          else if(o.t==='tool_start'){toolStart(body,o);}
+          else if(o.t==='tool_end'){toolEnd(body,o);}
+          else if(o.token){raw+=o.token;scheduleRender();}
+          else if(o.error){body.closest('.msg').remove();addErrorMsg(o.error);finished=true;}
+        }catch(_){}
+      }
+      if(finished) break;
+    }
+    if(raw){renderQueued=false;aiTxt(body).innerHTML=renderMarkdown(raw);}
+    else if(!body.closest('.msg')){/* error already shown */}
+    else if(!finished){body.closest('.msg').remove();addErrorMsg('连接中断，未收到回复');}
+  }catch(e){
+    try{body.closest('.msg').remove();}catch(_){}
+    addErrorMsg('网络错误：'+e.message);
+  }
+  setBusy(false);autoscroll();
+}
+/* ---------- composer ---------- */
+function autosize(){inputEl.style.height='auto';inputEl.style.height=Math.min(inputEl.scrollHeight,160)+'px';}
+inputEl.addEventListener('input',autosize);
+inputEl.addEventListener('keydown',function(e){
+  if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();doSend();}
+});
+sendBtn.addEventListener('click',doSend);
+$('newChat').addEventListener('click',newChat);
+/* mobile sidebar */
+var sidebar=$('sidebar'), overlay=$('overlay');
+function closeSidebar(){sidebar.classList.remove('open');overlay.classList.remove('show');}
+$('menuBtn').addEventListener('click',function(){sidebar.classList.add('open');overlay.classList.add('show');});
+overlay.addEventListener('click',closeSidebar);
+/* ---------- boot ---------- */
+showEmpty();refreshSessions();refreshSandboxStatus();autosize();
+setInterval(refreshSandboxStatus,60000);
+</script>
+</body>
+</html>

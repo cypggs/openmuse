@@ -1,0 +1,9 @@
+# 部署时不打进镜像的东西（nixpacks 会自己 npm install）
+node_modules/
+npm-debug.log*
+*.log
+.git/
+.gitignore
+.env
+.env.*
+.DS_Store

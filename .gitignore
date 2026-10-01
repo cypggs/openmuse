@@ -1,0 +1,9 @@
+.insta/
+node_modules/
+app/node_modules/
+.claude/
+.agents/
+.env
+*.log
+.codex/
+skills-lock.json
