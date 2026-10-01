@@ -248,11 +248,21 @@ app.post('/api/chat', requireDb, async (req, res) => {
         const userMsgs = history.filter((m) => m.role === 'user');
         const lastUser = userMsgs[userMsgs.length - 1];
         const lastLen = lastUser ? String(lastUser.content || '').length : 0;
+        console.log('[openmuse] memory extraction check:', {
+          userMsgs: userMsgs.length,
+          lastLen,
+          fullLen: full.length,
+        });
         if (userMsgs.length >= 2 && lastLen > 15) {
           const recent = [...history.slice(-11), { role: 'assistant', content: full }];
-          memory.extractMemories('default', recent).catch((e) => {
-            console.error('[openmuse] memory extraction error:', e && e.message);
-          });
+          memory
+            .extractMemories('default', recent)
+            .then((items) => {
+              console.log('[openmuse] memory extraction done:', items.length, 'items');
+            })
+            .catch((e) => {
+              console.error('[openmuse] memory extraction error:', e && e.message);
+            });
         }
       } catch (e) {
         console.error('[openmuse] memory extraction error:', e && e.message);
