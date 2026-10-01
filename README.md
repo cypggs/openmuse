@@ -56,6 +56,10 @@ snapshot 检查点保证状态跨会话保留，约 1 秒恢复。
 | `AWS_ENDPOINT_URL_S3` | 是（S3 导出层，可选） | S3 endpoint |
 | `AWS_REGION` | 否 | 默认 us-east-1 |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | 是（S3 导出层，可选） | S3 凭证 |
+| `BETTER_AUTH_SECRET` | 是（登录） | 会话签名密钥，≥ 32 字符：`openssl rand -base64 32` |
+| `BETTER_AUTH_URL` | 是（登录） | 对外访问地址，生产环境 `https://openmuse.icu`，本地 `http://localhost:3000` |
+| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | 是（登录） | GitHub OAuth App 凭证 |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | 是（登录） | Google OAuth 客户端凭证 |
 
 所有密钥只从环境变量读取，代码里不写、不打印、不落盘。
 InstaCloud 上用 `insta secrets set <NAME>`（值走 stdin）管理。
@@ -131,13 +135,68 @@ insta deploy ./app --group app --port 3000
 - **v2 计划**：pgvector 语义检索（按当前对话 embedding 召回相关记忆），
   以及记忆合并/过期（低 importance 长时间未命中自动衰减）。
 
+## 登录与多用户（GitHub + Google OAuth）
+
+登录基于 [better-auth](https://better-auth.com)（v1.7.x），数据库直接复用现有 pg Pool，
+auth 表为 `user` / `session` / `account` / `verification`（均为单数，
+与聊天会话的 `sessions`（复数）表不冲突），由服务启动时的 `initDb()` 幂等创建。
+
+- **启用条件**：`GITHUB_CLIENT_ID`、`GITHUB_CLIENT_SECRET`、
+  `GOOGLE_CLIENT_ID`、`GOOGLE_CLIENT_SECRET` 四个环境变量全齐
+  （任一 provider 缺失时该登录按钮不显示，但服务不崩）。
+  未启用时走**单用户开发模式**：所有接口直接用 `userId='default'` 放行。
+- **守卫**：`/api/chat`、`/api/sessions*`、`/api/memories*`、`/api/sandbox/*`
+  全部经过 `requireUser` 中间件（`GET /api/auth/get-session` 校验 cookie session）；
+  启用登录但无 session 时返回 `401 {error:'unauthorized', message:'请先登录'}`。
+- **隔离**：`sessions` 表新增 `user_id` 列（旧数据归 `'default'`），
+  会话、消息、长期记忆、sandbox 映射全部按登录用户的 better-auth `user.id` 隔离。
+- **前端**：`static/login.html` 登录页（两个 OAuth 按钮）；
+  `static/index.html` 启动时先调 `GET /api/auth-config` + `GET /api/auth/get-session`，
+  启用登录且无 session 时跳转 `/login.html`，右上角显示用户名/头像 + 登出按钮
+  （`POST /api/auth/sign-out`）。`/api/health` 与 `/api/auth/*` 保持公开。
+- OAuth token 落库前用 `account.encryptOAuthTokens` 加密（AES-256-GCM）。
+
+### 创建 OAuth 应用
+
+**GitHub**：Settings → Developer settings → OAuth Apps → New OAuth App
+
+| 项 | 填 |
+|---|---|
+| Application name | openmuse |
+| Homepage URL | `https://openmuse.icu` |
+| Authorization callback URL | `https://openmuse.icu/api/auth/callback/github` |
+
+创建后拿到 Client ID，Generate new client secret 拿到 Client Secret。
+
+**Google**：[Google Cloud Console](https://console.cloud.google.com) →
+API 和服务 → 凭据 → 创建凭据 → OAuth 客户端 ID（应用类型：Web 应用）
+
+| 项 | 填 |
+|---|---|
+| 名称 | openmuse |
+| 已获授权的重定向 URI | `https://openmuse.icu/api/auth/callback/google` |
+
+首次创建需先配置 OAuth 同意屏幕（外部用户类型即可自用）。
+
+### 部署时注入密钥（值走 stdin，不进 shell 历史）
+
+```bash
+insta secrets set --service compute/app BETTER_AUTH_SECRET   # openssl rand -base64 32 生成
+insta secrets set --service compute/app BETTER_AUTH_URL      # https://openmuse.icu
+insta secrets set --service compute/app GITHUB_CLIENT_ID
+insta secrets set --service compute/app GITHUB_CLIENT_SECRET
+insta secrets set --service compute/app GOOGLE_CLIENT_ID
+insta secrets set --service compute/app GOOGLE_CLIENT_SECRET
+insta deploy ./app --group app --port 3000
+```
+
 ## Roadmap
 
 - [ ] 多模型路由与降级（9Router）、逐条 token/成本展示
 - [ ] 语音输入（whisper-turbo）
 - [ ] noVNC 实时桌面视图（看 agent 操作云电脑）
 - [ ] 自然语言 cron / 主动推送
-- [ ] 多用户账号体系（`userId` 接入真实身份）
+- [x] 多用户账号体系（GitHub + Google OAuth 登录，`userId` 按登录用户隔离）
 - [ ] subagents 与 skills 可视化
 
 ## 协议

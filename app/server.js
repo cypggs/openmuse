@@ -7,16 +7,15 @@ const express = require('express');
 const path = require('path');
 const crypto = require('crypto');
 const { Pool } = require('pg');
+const { toNodeHandler } = require('better-auth/node');
 const agent = require('./lib/agent');
 const sandboxMgr = require('./lib/sandbox');
 const memory = require('./lib/memory');
+const authLib = require('./lib/auth');
 
 const PORT = Number(process.env.PORT) || 3000;
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || '';
 const DATABASE_URL = process.env.DATABASE_URL || '';
-
-const app = express();
-app.use(express.json({ limit: '1mb' }));
 
 // ---------- database ----------
 let pool = null;
@@ -33,6 +32,18 @@ if (DATABASE_URL) {
   console.warn('[openmuse] DATABASE_URL 未设置：以无持久化模式运行，会话与消息不会保存');
 }
 sandboxMgr.startReaper();
+
+const app = express();
+
+// better-auth 路由必须在 express.json() 之前注册（handler 自己处理 body）。
+// 没有 DATABASE_URL 时 auth 为 null，/api/auth/* 自然 404，服务降级为单用户开发模式。
+if (pool) authLib.initAuth(pool);
+const auth = authLib.getAuth();
+if (auth) {
+  app.all('/api/auth/*', toNodeHandler(auth));
+}
+
+app.use(express.json({ limit: '1mb' }));
 
 async function initDb() {
   if (!pool) return;
@@ -70,6 +81,57 @@ async function initDb() {
   await pool.query(
     `CREATE INDEX IF NOT EXISTS memories_user_importance_idx ON memories (user_id, importance DESC, updated_at DESC)`
   );
+  // 登录与多用户：sessions 增加 user_id（旧数据归 'default'）
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_id TEXT`);
+  await pool.query(`UPDATE sessions SET user_id = 'default' WHERE user_id IS NULL`);
+  await pool.query(
+    `CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions (user_id, created_at DESC)`
+  );
+  // better-auth 表（user / session / account / verification，均为单数，与
+  // 现有的聊天 sessions（复数）表不冲突）。表名/列名取自 better-auth 1.7.7
+  // 默认 schema（id text 主键，string→text，boolean→boolean，date→timestamptz）。
+  await pool.query(`CREATE TABLE IF NOT EXISTS "user" (
+    "id" text NOT NULL PRIMARY KEY,
+    "name" text NOT NULL,
+    "email" text NOT NULL UNIQUE,
+    "emailVerified" boolean NOT NULL,
+    "image" text,
+    "createdAt" timestamptz NOT NULL,
+    "updatedAt" timestamptz NOT NULL
+  )`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS "session" (
+    "id" text NOT NULL PRIMARY KEY,
+    "expiresAt" timestamptz NOT NULL,
+    "token" text NOT NULL UNIQUE,
+    "createdAt" timestamptz NOT NULL,
+    "updatedAt" timestamptz NOT NULL,
+    "ipAddress" text,
+    "userAgent" text,
+    "userId" text NOT NULL REFERENCES "user"("id") ON DELETE CASCADE
+  )`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS "account" (
+    "id" text NOT NULL PRIMARY KEY,
+    "accountId" text NOT NULL,
+    "providerId" text NOT NULL,
+    "userId" text NOT NULL REFERENCES "user"("id") ON DELETE CASCADE,
+    "accessToken" text,
+    "refreshToken" text,
+    "idToken" text,
+    "accessTokenExpiresAt" timestamptz,
+    "refreshTokenExpiresAt" timestamptz,
+    "scope" text,
+    "password" text,
+    "createdAt" timestamptz NOT NULL,
+    "updatedAt" timestamptz NOT NULL
+  )`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS "verification" (
+    "id" text NOT NULL PRIMARY KEY,
+    "identifier" text NOT NULL,
+    "value" text NOT NULL,
+    "expiresAt" timestamptz NOT NULL,
+    "createdAt" timestamptz NOT NULL,
+    "updatedAt" timestamptz NOT NULL
+  )`);
   console.log('[openmuse] database ready');
 }
 
@@ -83,37 +145,59 @@ function requireDb(req, res, next) {
   next();
 }
 
+// 登录守卫：启用登录时要求有效 session；未启用时走单用户开发模式（userId='default'）。
+const requireUser = authLib.requireUser();
+
 // ---------- api ----------
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
-app.get('/api/sessions', requireDb, async (req, res) => {
+app.get('/api/auth-config', (req, res) => {
+  res.json({ authEnabled: authLib.isAuthEnabled(), providers: authLib.authProviders() });
+});
+
+app.get('/api/sessions', requireDb, requireUser, async (req, res) => {
   try {
-    const { rows } = await pool.query(`
+    const { rows } = await pool.query(
+      `
       SELECT s.id, s.title, s.created_at
       FROM sessions s
       LEFT JOIN messages m ON m.session_id = s.id
+      WHERE s.user_id = $1
       GROUP BY s.id
       ORDER BY COALESCE(MAX(m.created_at), s.created_at) DESC
-    `);
+    `,
+      [req.userId]
+    );
     res.json(rows);
   } catch (e) {
     res.status(500).json({ error: 'db_error', message: e.message });
   }
 });
 
-app.post('/api/sessions', requireDb, async (req, res) => {
+app.post('/api/sessions', requireDb, requireUser, async (req, res) => {
   try {
     const id = crypto.randomUUID();
     const title = (req.body && typeof req.body.title === 'string' && req.body.title.trim()) || '新的对话';
-    await pool.query('INSERT INTO sessions (id, title) VALUES ($1, $2)', [id, title]);
+    await pool.query('INSERT INTO sessions (id, title, user_id) VALUES ($1, $2, $3)', [
+      id,
+      title,
+      req.userId,
+    ]);
     res.json({ id });
   } catch (e) {
     res.status(500).json({ error: 'db_error', message: e.message });
   }
 });
 
-app.get('/api/sessions/:id/messages', requireDb, async (req, res) => {
+app.get('/api/sessions/:id/messages', requireDb, requireUser, async (req, res) => {
   try {
+    const owner = await pool.query('SELECT id FROM sessions WHERE id = $1 AND user_id = $2', [
+      req.params.id,
+      req.userId,
+    ]);
+    if (owner.rowCount === 0) {
+      return res.status(404).json({ error: 'not_found', message: '会话不存在' });
+    }
     const { rows } = await pool.query(
       'SELECT role, content, created_at FROM messages WHERE session_id = $1 ORDER BY id ASC',
       [req.params.id]
@@ -124,9 +208,12 @@ app.get('/api/sessions/:id/messages', requireDb, async (req, res) => {
   }
 });
 
-app.delete('/api/sessions/:id', requireDb, async (req, res) => {
+app.delete('/api/sessions/:id', requireDb, requireUser, async (req, res) => {
   try {
-    const r = await pool.query('DELETE FROM sessions WHERE id = $1', [req.params.id]);
+    const r = await pool.query('DELETE FROM sessions WHERE id = $1 AND user_id = $2', [
+      req.params.id,
+      req.userId,
+    ]);
     if (r.rowCount === 0) return res.status(404).json({ error: 'not_found', message: '会话不存在' });
     res.json({ ok: true });
   } catch (e) {
@@ -134,7 +221,7 @@ app.delete('/api/sessions/:id', requireDb, async (req, res) => {
   }
 });
 
-app.post('/api/chat', requireDb, async (req, res) => {
+app.post('/api/chat', requireDb, requireUser, async (req, res) => {
   const body = req.body || {};
   const message = typeof body.message === 'string' ? body.message.trim() : '';
   let sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
@@ -150,16 +237,23 @@ app.post('/api/chat', requireDb, async (req, res) => {
   }
 
   try {
-    // Ensure session exists (create on demand).
+    // Ensure session exists and belongs to this user (create on demand).
     let sessionExists = false;
     if (sessionId) {
-      const s = await pool.query('SELECT id FROM sessions WHERE id = $1', [sessionId]);
+      const s = await pool.query('SELECT id FROM sessions WHERE id = $1 AND user_id = $2', [
+        sessionId,
+        req.userId,
+      ]);
       sessionExists = s.rowCount > 0;
     }
     if (!sessionExists) {
       sessionId = crypto.randomUUID();
       const title = Array.from(message).slice(0, 24).join('') || '新的对话';
-      await pool.query('INSERT INTO sessions (id, title) VALUES ($1, $2)', [sessionId, title]);
+      await pool.query('INSERT INTO sessions (id, title, user_id) VALUES ($1, $2, $3)', [
+        sessionId,
+        title,
+        req.userId,
+      ]);
     }
 
     await pool.query('INSERT INTO messages (session_id, role, content) VALUES ($1, $2, $3)', [
@@ -198,7 +292,7 @@ app.post('/api/chat', requireDb, async (req, res) => {
     // v1.1: 长期记忆注入 system prompt（无记忆时不注入该块）
     let systemExtra = '';
     try {
-      const mems = await memory.getMemories('default', 20);
+      const mems = await memory.getMemories(req.userId, 20);
       const block = memory.formatMemoryBlock(mems);
       if (block) {
         systemExtra =
@@ -213,7 +307,7 @@ app.post('/api/chat', requireDb, async (req, res) => {
     let full = '';
     try {
       const r = await agent.runAgent({
-        userId: 'default', // v1: single user
+        userId: req.userId,
         sessionId,
         history,
         systemExtra,
@@ -256,7 +350,7 @@ app.post('/api/chat', requireDb, async (req, res) => {
         if (userMsgs.length >= 2 && lastLen > 15) {
           const recent = [...history.slice(-11), { role: 'assistant', content: full }];
           memory
-            .extractMemories('default', recent)
+            .extractMemories(req.userId, recent)
             .then((items) => {
               console.log('[openmuse] memory extraction done:', items.length, 'items');
             })
@@ -282,9 +376,9 @@ app.post('/api/chat', requireDb, async (req, res) => {
 });
 
 // ---------- sandbox ----------
-app.get('/api/sandbox/status', async (req, res) => {
+app.get('/api/sandbox/status', requireUser, async (req, res) => {
   try {
-    const s = await sandboxMgr.getStatus('default');
+    const s = await sandboxMgr.getStatus(req.userId);
     if (s.status === 'unconfigured') {
       return res.status(503).json({
         error: 'e2b_not_configured',
@@ -297,7 +391,7 @@ app.get('/api/sandbox/status', async (req, res) => {
   }
 });
 
-app.post('/api/sandbox/snapshot', async (req, res) => {
+app.post('/api/sandbox/snapshot', requireUser, async (req, res) => {
   if (!process.env.E2B_API_KEY) {
     return res.status(503).json({
       error: 'e2b_not_configured',
@@ -306,14 +400,14 @@ app.post('/api/sandbox/snapshot', async (req, res) => {
   }
   try {
     // v2.1: E2B 原生 snapshot 检查点
-    const r = await sandboxMgr.createCheckpoint('default');
+    const r = await sandboxMgr.createCheckpoint(req.userId);
     res.json(r);
   } catch (e) {
     res.status(500).json({ error: 'snapshot_failed', message: '手动快照失败：' + e.message });
   }
 });
 
-app.post('/api/sandbox/pause', async (req, res) => {
+app.post('/api/sandbox/pause', requireUser, async (req, res) => {
   if (!process.env.E2B_API_KEY) {
     return res.status(503).json({
       error: 'e2b_not_configured',
@@ -321,14 +415,14 @@ app.post('/api/sandbox/pause', async (req, res) => {
     });
   }
   try {
-    const r = await sandboxMgr.pauseSandbox('default');
+    const r = await sandboxMgr.pauseSandbox(req.userId);
     res.json(r);
   } catch (e) {
     res.status(500).json({ error: 'pause_failed', message: '暂停云电脑失败：' + e.message });
   }
 });
 
-app.post('/api/sandbox/export', async (req, res) => {
+app.post('/api/sandbox/export', requireUser, async (req, res) => {
   if (!process.env.E2B_API_KEY) {
     return res.status(503).json({
       error: 'e2b_not_configured',
@@ -337,7 +431,7 @@ app.post('/api/sandbox/export', async (req, res) => {
   }
   try {
     // S3 导出层（可移植性），主路径已是 E2B 原生 pause/resume + snapshot
-    const r = await sandboxMgr.exportToS3('default');
+    const r = await sandboxMgr.exportToS3(req.userId);
     res.json(r);
   } catch (e) {
     res.status(500).json({ error: 'export_failed', message: '导出工作区失败：' + e.message });
@@ -345,17 +439,17 @@ app.post('/api/sandbox/export', async (req, res) => {
 });
 
 // ---------- memories (长期记忆 v1.1) ----------
-app.get('/api/memories', requireDb, async (req, res) => {
+app.get('/api/memories', requireDb, requireUser, async (req, res) => {
   try {
-    res.json(await memory.listMemories('default'));
+    res.json(await memory.listMemories(req.userId));
   } catch (e) {
     res.status(500).json({ error: 'db_error', message: e.message });
   }
 });
 
-app.delete('/api/memories/:id', requireDb, async (req, res) => {
+app.delete('/api/memories/:id', requireDb, requireUser, async (req, res) => {
   try {
-    const n = await memory.deleteMemory('default', req.params.id);
+    const n = await memory.deleteMemory(req.userId, req.params.id);
     if (!n) return res.status(404).json({ error: 'not_found', message: '记忆不存在' });
     res.json({ ok: true });
   } catch (e) {
