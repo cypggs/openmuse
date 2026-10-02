@@ -183,11 +183,12 @@ async function ensureWebsockify(sbx) {
   if (code === '200') return; // 正常
 
   console.log(`[browser] websockify on 6080 returned ${code}, restarting with --web...`);
-  // 杀掉旧的（用 [w] 技巧避免 pkill 匹配到自身命令行），带 --web 重启
+  // 分两步：先杀旧的（单条命令，避免 pkill 匹配到自身），再启动新的
+  await sbx.commands.run('pkill -f "[w]ebsockify" 2>/dev/null; sleep 1; true', { timeoutMs: 10000 });
   await sbx.commands.run(
-    'pkill -f "[w]ebsockify.*6080" 2>/dev/null; sleep 1; ' +
     'nohup python3 -m websockify --web /opt/noVNC 6080 localhost:5900 > /tmp/websockify.log 2>&1 < /dev/null & ' +
-    'sleep 2; curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:6080/ 2>/dev/null; true'
+    'sleep 2; curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:6080/ 2>/dev/null; true',
+    { timeoutMs: 15000 }
   );
 }
 
