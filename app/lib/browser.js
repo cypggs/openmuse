@@ -175,19 +175,19 @@ async function getLiveUrl(userId) {
  * 模板的 start-desktop.sh 里 websockify 缺 --web 参数，会导致 405。
  */
 async function ensureWebsockify(sbx) {
-  // 检查 6080 是否返回 200
+  // 检查 6080 是否返回 200（注意：curl 失败时 -w 输出 000，不要再 echo，避免 "000000"）
   const check = await sbx.commands.run(
-    'curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:6080/ 2>/dev/null || echo "000"'
+    'curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:6080/ 2>/dev/null; true'
   );
   const code = check.stdout.trim();
   if (code === '200') return; // 正常
 
   console.log(`[browser] websockify on 6080 returned ${code}, restarting with --web...`);
-  // 杀掉旧的，带 --web 重启
+  // 杀掉旧的（用 [w] 技巧避免 pkill 匹配到自身命令行），带 --web 重启
   await sbx.commands.run(
-    'pkill -f "websockify.*6080" 2>/dev/null; sleep 1; ' +
+    'pkill -f "[w]ebsockify.*6080" 2>/dev/null; sleep 1; ' +
     'nohup python3 -m websockify --web /opt/noVNC 6080 localhost:5900 > /tmp/websockify.log 2>&1 < /dev/null & ' +
-    'sleep 2; curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:6080/ 2>/dev/null || echo "000"'
+    'sleep 2; curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:6080/ 2>/dev/null; true'
   );
 }
 
