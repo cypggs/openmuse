@@ -86,12 +86,15 @@ function createOpts(userId) {
   return {
     // P1: 浏览器能力需要 desktop 模板（Chrome + Xvfb + noVNC）。
     // "每用户一台电脑"：用户的 sandbox 即 desktop，代码工具照常可用（Node 20）。
-    template: 'openmuse-desktop',
+    template: DESKTOP_TEMPLATE,
     timeoutMs: LIFETIME_MS,
     metadata: { owner: 'openmuse', userId: String(userId) },
     lifecycle: { onTimeout: 'pause', autoResume: true },
   };
 }
+
+// P1: 当前使用的模板（老用户从默认模板迁移过来）
+const DESKTOP_TEMPLATE = 'openmuse-desktop';
 
 // ---------- path safety: everything stays under WORKDIR ----------
 function safePath(p) {
@@ -204,10 +207,24 @@ async function findExisting(userId) {
   if (!pool) return null;
   try {
     const r = await pool.query(
-      'SELECT sandbox_id, status FROM user_sandboxes WHERE user_id = $1',
+      'SELECT sandbox_id, status, template FROM user_sandboxes WHERE user_id = $1',
       [userId]
     );
     if (r.rowCount > 0 && r.rows[0].sandbox_id && (r.rows[0].status === 'active' || r.rows[0].status === 'paused')) {
+      // P1 模板迁移：老用户还在默认模板（478MB），必须换成 desktop 模板（4G）
+      const storedTemplate = r.rows[0].template || 'default';
+      if (storedTemplate !== DESKTOP_TEMPLATE) {
+        console.log(`[openmuse] migrating user=${userId} from template=${storedTemplate} to ${DESKTOP_TEMPLATE}`);
+        try {
+          // 尝试杀掉老 sandbox（避免资源浪费）；失败也不阻塞
+          const oldSbx = await Sandbox.connect(r.rows[0].sandbox_id).catch(() => null);
+          if (oldSbx) await oldSbx.kill().catch(() => {});
+        } catch (_) {}
+        // 清掉老记录，让 getSandbox 走全新创建
+        await pool.query(`DELETE FROM user_sandboxes WHERE user_id = $1`, [userId]).catch(() => {});
+        live.delete(userId);
+        return null;
+      }
       try {
         // connect 对 paused sandbox 自动 resume（约 1s）
         const sbx = await Sandbox.connect(r.rows[0].sandbox_id);
@@ -266,11 +283,11 @@ async function getSandbox(userId) {
 
   if (pool) {
     await pool.query(
-      `INSERT INTO user_sandboxes (user_id, sandbox_id, status, last_active_at)
-       VALUES ($1, $2, 'active', now())
+      `INSERT INTO user_sandboxes (user_id, sandbox_id, status, last_active_at, template)
+       VALUES ($1, $2, 'active', now(), $3)
        ON CONFLICT (user_id) DO UPDATE
-       SET sandbox_id = $2, status = 'active', last_active_at = now()`,
-      [userId, sbx.sandboxId]
+       SET sandbox_id = $2, status = 'active', last_active_at = now(), template = $3`,
+      [userId, sbx.sandboxId, DESKTOP_TEMPLATE]
     );
   }
   live.set(userId, { sbx, lastActiveAt: Date.now(), paused: false, busy: false, toolCount: 0 });

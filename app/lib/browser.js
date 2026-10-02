@@ -30,7 +30,7 @@ const SENSITIVE_DOMAINS = [
  * driver 不在时上传并启动。
  */
 async function ensureDriver(userId) {
-  const sbx = await sandboxMgr.getOrCreate(userId);
+  const sbx = await sandboxMgr.getSandbox(userId);
 
   // 检查 driver 是否在跑
   try {

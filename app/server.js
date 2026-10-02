@@ -79,6 +79,8 @@ async function initDb() {
   )`);
   // v2.1: native snapshot checkpoint column
   await pool.query(`ALTER TABLE user_sandboxes ADD COLUMN IF NOT EXISTS snapshot_id TEXT`);
+  // P1: 模板追踪（desktop 迁移用）
+  await pool.query(`ALTER TABLE user_sandboxes ADD COLUMN IF NOT EXISTS template TEXT`);
   // v1.1: 长期记忆
   await pool.query(`CREATE TABLE IF NOT EXISTS memories (
     id SERIAL PRIMARY KEY,
