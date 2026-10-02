@@ -49,6 +49,8 @@ function setPool(p) {
 // ---------- in-memory live sandbox handles ----------
 // userId -> { sbx, lastActiveAt, paused, busy, toolCount }
 const live = new Map();
+// 迁移锁：防止并发 getSandbox 在迁移时竞态（一个杀老 sandbox，另一个还在用）
+const migrating = new Set();
 
 function touch(userId) {
   const entry = live.get(userId);
@@ -246,7 +248,16 @@ async function findExisting(userId) {
 
 async function getSandbox(userId) {
   if (!E2B_API_KEY) throw new Error('E2B_API_KEY 未配置，云电脑不可用');
+  // 迁移进行中时等待（避免竞态：一个在杀老 sandbox，另一个还在用）
+  if (migrating.has(userId)) {
+    console.log(`[openmuse] user=${userId} 迁移进行中，等待...`);
+    for (let i = 0; i < 90; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
+      if (!migrating.has(userId)) break;
+    }
+  }
   const existing = await findExisting(userId);
+  let needMigration = false;
   if (existing) {
     // 硬检查：确认是 desktop 模板（防 DB 记录与实际不符）
     // 老 478MB 模板没有 /opt/noVNC，必须迁移
@@ -254,12 +265,7 @@ async function getSandbox(userId) {
       const chk = await existing.commands.run('test -d /opt/noVNC && echo DESKTOP || echo OLD', { timeoutMs: 10000 });
       if (chk.stdout.trim() !== 'DESKTOP') {
         console.log(`[openmuse] user=${userId} sandbox 不是 desktop 模板，强制迁移`);
-        try { await existing.kill().catch(() => {}); } catch (_) {}
-        live.delete(userId);
-        if (pool) {
-          await pool.query(`DELETE FROM user_sandboxes WHERE user_id = $1`, [userId]).catch(() => {});
-        }
-        // 掉到下面的新建逻辑
+        needMigration = true;
       } else {
         await heartbeat(existing);
         return existing;
@@ -269,6 +275,33 @@ async function getSandbox(userId) {
       // 检查失败也返回 existing，避免误杀
       await heartbeat(existing);
       return existing;
+    }
+  }
+  // 迁移或新建：加锁，整个过程（杀+建）独占
+  if (needMigration) {
+    if (migrating.has(userId)) {
+      // 另一个请求已在迁移，等待它完成
+      for (let i = 0; i < 90; i++) {
+        await new Promise((r) => setTimeout(r, 2000));
+        if (!migrating.has(userId)) break;
+      }
+      const after = await findExisting(userId);
+      if (after) {
+        await heartbeat(after);
+        return after;
+      }
+      // 掉到新建
+    } else {
+      migrating.add(userId);
+      try {
+        try { await existing.kill().catch(() => {}); } catch (_) {}
+        live.delete(userId);
+        if (pool) {
+          await pool.query(`DELETE FROM user_sandboxes WHERE user_id = $1`, [userId]).catch(() => {});
+        }
+      } finally {
+        // 注意：锁在新建完成后才释放（见下方）
+      }
     }
   }
 
@@ -311,6 +344,8 @@ async function getSandbox(userId) {
     );
   }
   live.set(userId, { sbx, lastActiveAt: Date.now(), paused: false, busy: false, toolCount: 0 });
+  // 迁移完成，释放锁
+  migrating.delete(userId);
   await heartbeat(sbx);
   console.log(`[openmuse] sandbox ready for user=${userId} id=${sbx.sandboxId} via=${how}`);
   return sbx;
