@@ -207,9 +207,22 @@ vault_credentials(user_id, site, username_enc, password_enc, iv, tag,
 |---|---|
 | 默认 sandbox 规格 | **2 CPU / 478 MB**（低于文档称的 1G；Debian 12） |
 | 默认规格 + Chrome 154 | ❌ 跑不起来：headless 截图挂起 60s 被杀；`--single-process` exit=0 但无输出 |
-| 模板指定规格 | ✅ `Template.build(tpl, name, {cpuCount: 2, memoryMB: 4096})` 一次成功 |
+| 模板指定规格 | ✅ `Template.build(tpl, name, {cpuCount: 2, memoryMB: 4096})` 成功 |
 | 新模板起 sandbox | ✅ `nproc`=2，`free`=**3931 MB**（4096 扣除系统保留），规格如实生效 |
-| 模板构建方式 | ✅ SDK `Template.build` 可用；CLI 亦支持 `--cpu-count/--memory-mb` |
+| 模板构建方式 | ✅ SDK `Template.build` / `buildInBackground` 可用；CLI 亦支持 `--cpu-count/--memory-mb` |
+
+### 桌面模板验证（2026-10-02，`openmuse-desktop` 构建成功）
+
+模板内容：Ubuntu 22.04 + Xvfb + openbox + x11vnc + noVNC/websockify + Chrome 154 + Node 20 + Playwright。
+
+| 验证项 | 结果 |
+|---|---|
+| 构建 | ✅ `Template.build` 一次成功（约 20 分钟；需 `.setUser('root')` 否则 apt-key 报权限错误） |
+| 自启动 | ✅ sandbox 启动后 Xvfb :99、openbox、x11vnc :5900、websockify :6080 自动运行 |
+| headless 截图 | ✅ `google-chrome --headless --screenshot` 正常出图（20874 字节） |
+| 规格 | ✅ 2C / 3931MB |
+
+注意：构建期间**不要 `insta deploy`**（容器重启会杀掉构建进程）；改用 `buildInBackground` + 保存 `{templateId, buildId}` 可断点续查。
 
 ### 结论
 
@@ -222,13 +235,11 @@ vault_credentials(user_id, site, username_enc, password_enc, iv, tag,
 
 ### 待办（P1 实施前）
 
-- [ ] 按 `docs/browser-vault-design.md` §4.1 构建完整 desktop 模板
-      （基于 `e2b-dev/desktop` 精简：Xvfb + Chrome + x11vnc + noVNC + Node 20，
-      去掉 LibreOffice/Firefox/VSCode 以控制构建时间；spike 用 Dockerfile 已备好
-      `~/workspace/spike-test/template/`）。
-- [ ] 在 4G 模板上实测 Chrome headless 截图 + Xvfb headed 运行（spike 只验证到规格生效）。
+- [x] 构建完整 desktop 模板（`openmuse-desktop`，2C/4G，Chrome 154 + Xvfb + noVNC）
+- [x] 在 4G 模板上实测 Chrome headless 截图（✅）+ 桌面自启动（✅）
 - [ ] 去 e2b.dev/pricing 核对 2C/4G 的计费（spike 未覆盖价格）。
 - [ ] 测试模板 `openmuse-spike-minimal` 为 spike 产物，可删除。
+- [ ] P1 browser-driver：Playwright driver + 审批集成（见 §4）。
 
 ## 9. 实施顺序与依赖
 
