@@ -701,6 +701,17 @@ app.get('/api/browser/live-url', requireUser, async (req, res) => {
   }
 });
 
+// H264 推流（对标 Memoh）：WebSocket + WebCodecs，前端 <canvas> 渲染
+app.get('/api/stream/url', requireUser, async (req, res) => {
+  try {
+    const browser = require('./lib/browser');
+    const url = await browser.getStreamUrl(req.userId);
+    res.json({ url, transport: 'h264-ws' });
+  } catch (e) {
+    res.status(500).json({ error: 'stream_url_failed', message: e.message.slice(0, 200) });
+  }
+});
+
 // P2: 浏览器截图（PNG，供前端展示）
 app.get('/api/browser/screenshot', requireUser, async (req, res) => {
   try {
