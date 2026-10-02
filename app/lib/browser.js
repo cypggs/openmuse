@@ -157,6 +157,17 @@ async function screenshot(userId) {
   return driverFetch(sbx, '/screenshot', { method: 'GET' }); // 返回 Buffer
 }
 
+/**
+ * P2: 获取 noVNC Live View URL。
+ * 经 E2B getHost(6080) 反代，直接可访问（MVP 无密码，P4 加 backend 反代审计）。
+ */
+async function getLiveUrl(userId) {
+  const sbx = await ensureDriver(userId); // 确保 desktop 在跑
+  const host = sbx.getHost(6080);
+  // noVNC 的 index.html 已 symlink 到 vnc.html
+  return `https://${host}/`;
+}
+
 module.exports = {
   setPool,
   ensureDriver,
@@ -166,6 +177,7 @@ module.exports = {
   fill,
   press,
   screenshot,
+  getLiveUrl,
   DRIVER_PORT,
   SENSITIVE_DOMAINS,
 };

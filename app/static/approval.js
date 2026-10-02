@@ -57,6 +57,12 @@
       })
       .join('');
 
+    // 凭证/登录类审批：提供"亲自登录"选项（打开 Live View，用户自己输密码）
+    var isLoginKind = a.kind === 'credential_fill' || a.kind === 'sensitive_nav';
+    var loginBtn = isLoginKind
+      ? '<button class="appr-btn login" data-act="open-live">🖥️ 亲自登录</button>'
+      : '';
+
     card.innerHTML =
       '<div class="appr-head"><span class="appr-icon">🔐</span>' +
       '<div class="appr-titles"><div class="appr-title">' + esc(a.title) + '</div>' +
@@ -67,13 +73,22 @@
       '<button class="appr-btn allow" data-d="allow_once">允许一次</button>' +
       '<button class="appr-btn always" data-d="allow_always">始终允许</button>' +
       '<button class="appr-btn deny" data-d="deny">拒绝</button>' +
-      '</div>';
+      '</div>' + (loginBtn ? '<div class="appr-btns appr-btns2">' + loginBtn + '</div>' : '');
 
-    card.querySelectorAll('.appr-btn').forEach(function (btn) {
+    card.querySelectorAll('.appr-btn[data-d]').forEach(function (btn) {
       btn.addEventListener('click', function () {
         decide(a.id, btn.getAttribute('data-d'), card);
       });
     });
+    var loginEl = card.querySelector('.appr-btn[data-act="open-live"]');
+    if (loginEl) {
+      loginEl.addEventListener('click', function () {
+        // 打开 Live View 让用户亲自登录；审批保持 pending（用户登完后可点允许/拒绝）
+        if (window.openLiveView) window.openLiveView();
+        var note = card.querySelector('.appr-note');
+        if (note) note.textContent = '已打开实时画面，请在浏览器里完成登录，回来后点"允许一次"继续。';
+      });
+    }
 
     container.appendChild(card);
     tickTimers();

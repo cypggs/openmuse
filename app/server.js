@@ -690,6 +690,29 @@ app.delete('/api/memories/:id', requireDb, requireUser, async (req, res) => {
   }
 });
 
+// P2: Live View URL（noVNC）
+app.get('/api/browser/live-url', requireUser, async (req, res) => {
+  try {
+    const browser = require('./lib/browser');
+    const url = await browser.getLiveUrl(req.userId);
+    res.json({ url });
+  } catch (e) {
+    res.status(500).json({ error: 'live_url_failed', message: e.message.slice(0, 200) });
+  }
+});
+
+// P2: 浏览器截图（PNG，供前端展示）
+app.get('/api/browser/screenshot', requireUser, async (req, res) => {
+  try {
+    const browser = require('./lib/browser');
+    const buf = await browser.screenshot(req.userId);
+    res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': buf.length });
+    res.end(buf);
+  } catch (e) {
+    res.status(500).json({ error: 'screenshot_failed', message: e.message.slice(0, 200) });
+  }
+});
+
 // ---------- approvals（审批 P0）----------
 // SSE 推送通道：前端页面加载时连接，审批请求/决定实时推送。
 app.get('/api/events', requireUser, (req, res) => {
