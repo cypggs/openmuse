@@ -212,6 +212,21 @@ async function ensureH264Stream(sbx) {
   if (check.stdout.includes('"ok":true')) return;
 
   console.log('[browser] h264-stream not running, starting...');
+
+  // 确保 GStreamer 已安装（新模板会预装，老 sandbox 运行时补装）
+  const gstCheck = await sbx.commands.run('which gst-launch-1.0 2>/dev/null || echo "MISSING"', { timeoutMs: 8000 });
+  if (gstCheck.stdout.includes('MISSING')) {
+    console.log('[browser] installing gstreamer...');
+    await sbx.commands.run(
+      'DEBIAN_FRONTEND=noninteractive apt-get update -qq && ' +
+      'DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ' +
+      'gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good ' +
+      'gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly 2>&1 | tail -2',
+      { timeoutMs: 300000 }
+    );
+    console.log('[browser] gstreamer installed');
+  }
+
   // 上传
   const src = fs.readFileSync(path.join(__dirname, '../driver/h264-stream.js'), 'utf8');
   await sbx.files.write(H264_REMOTE_PATH, src);
