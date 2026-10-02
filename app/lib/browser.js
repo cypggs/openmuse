@@ -163,9 +163,32 @@ async function screenshot(userId) {
  */
 async function getLiveUrl(userId) {
   const sbx = await ensureDriver(userId); // 确保 desktop 在跑
+  // 确保 websockify 正确 serve noVNC 文件（模板里的启动命令缺 --web 参数，405 的根因）
+  await ensureWebsockify(sbx);
   const host = sbx.getHost(6080);
   // noVNC 的 index.html 已 symlink 到 vnc.html
   return `https://${host}/`;
+}
+
+/**
+ * 确保 websockify 在 6080 上正确运行（带 --web serve 静态文件）。
+ * 模板的 start-desktop.sh 里 websockify 缺 --web 参数，会导致 405。
+ */
+async function ensureWebsockify(sbx) {
+  // 检查 6080 是否返回 200
+  const check = await sbx.commands.run(
+    'curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:6080/ 2>/dev/null || echo "000"'
+  );
+  const code = check.stdout.trim();
+  if (code === '200') return; // 正常
+
+  console.log(`[browser] websockify on 6080 returned ${code}, restarting with --web...`);
+  // 杀掉旧的，带 --web 重启
+  await sbx.commands.run(
+    'pkill -f "websockify.*6080" 2>/dev/null; sleep 1; ' +
+    'nohup python3 -m websockify --web /opt/noVNC 6080 localhost:5900 > /tmp/websockify.log 2>&1 < /dev/null & ' +
+    'sleep 2; curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:6080/ 2>/dev/null || echo "000"'
+  );
 }
 
 module.exports = {
