@@ -28,9 +28,14 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:15
 .sess:hover{background:var(--panel2);color:var(--text)}
 .sess.active{background:var(--panel2);color:var(--text);border-color:var(--border)}
 .sess .t{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sess .del{opacity:0;flex-shrink:0;width:24px;height:24px;border:none;border-radius:6px;background:transparent;color:var(--muted2);cursor:pointer;font-size:15px;line-height:1}
-.sess:hover .del{opacity:1}
-.sess .del:hover{color:var(--danger);background:rgba(242,109,109,.12)}
+.sess.mainrow{font-weight:600;color:var(--text);border-color:var(--accent)}
+.sess .star{color:var(--accent2);flex-shrink:0;font-size:13px}
+.sess .acts{opacity:0;flex-shrink:0;display:flex;gap:2px;transition:.15s}
+.sess:hover .acts{opacity:1}
+.sess .abtn{width:24px;height:24px;padding:0;border:none;border-radius:6px;background:transparent;color:var(--muted2);cursor:pointer;font-size:14px;line-height:1}
+.sess .abtn:hover{background:rgba(255,255,255,.08);color:var(--text)}
+.sess .abtn.danger:hover{color:var(--danger);background:rgba(242,109,109,.12)}
+.sgrp{font-size:11px;color:var(--muted2);padding:14px 12px 4px;letter-spacing:2px}
 .sidefoot{padding:12px 18px;border-top:1px solid var(--border);font-size:11.5px;color:var(--muted2)}
 /* long-term memory panel */
 .memwrap{border-top:1px solid var(--border);padding:6px 10px 10px}
@@ -142,7 +147,7 @@ textarea::placeholder{color:var(--muted2)}
   <div class="overlay" id="overlay"></div>
   <aside class="sidebar" id="sidebar">
     <div class="brand"><h1>openmuse</h1><p>青出于蓝</p></div>
-    <button class="newchat" id="newChat">＋ 新的对话</button>
+    <button class="newchat" id="newSide">＋ 旁聊</button>
     <div class="sessions" id="sessions"></div>
     <div class="memwrap">
       <div class="memhead" id="memHead"><span>🧠 长期记忆</span><span class="memtoggle" id="memToggle">▸</span></div>
@@ -347,28 +352,78 @@ $('memHead').addEventListener('click',function(){
   if(memOpen) refreshMemories();
 });
 /* ---------- sessions ---------- */
+/* 浏览器内 groupSides：与 app/lib/sidechat.js 保持一致（浏览器无 CommonJS，改逻辑须双边同步）。 */
+var DAY_MS=24*60*60*1000;
+function groupSides(sides){
+  var t=Date.now(), d=new Date(t); d.setHours(0,0,0,0); var dayStart=d.getTime();
+  var groups=[{label:'今天',items:[]},{label:'昨天',items:[]},{label:'近 7 天',items:[]},{label:'更早',items:[]}];
+  (sides||[]).forEach(function(s){
+    var ts=new Date((s&&s.last_active)||(s&&s.created_at)).getTime(), g;
+    if(isNaN(ts)) g=groups[3];
+    else if(ts>=dayStart) g=groups[0];
+    else if(ts>=dayStart-DAY_MS) g=groups[1];
+    else if(ts>=dayStart-7*DAY_MS) g=groups[2];
+    else g=groups[3];
+    g.items.push(s);
+  });
+  return groups.filter(function(g){return g.items.length>0;});
+}
+function sideTitle(s){return (s&&s.title)||'新的对话';}
+var mainSessionId=null;
+function sessRow(s,isMain){
+  var d=document.createElement('div');
+  d.className='sess'+(s.id===currentSessionId?' active':'')+(isMain?' mainrow':'');
+  if(isMain){var star=document.createElement('span');star.className='star';star.textContent='★';d.appendChild(star);}
+  var t=document.createElement('span');t.className='t';t.textContent=isMain?'主要聊天':sideTitle(s);t.title=t.textContent;
+  d.appendChild(t);
+  if(!isMain){
+    var acts=document.createElement('span');acts.className='acts';
+    var rn=document.createElement('button');rn.className='abtn';rn.textContent='✎';rn.title='改名';
+    rn.addEventListener('click',function(ev){ev.stopPropagation();renameSession(s.id,sideTitle(s));});
+    var ar=document.createElement('button');ar.className='abtn';ar.textContent='📦';ar.title='归档';
+    ar.addEventListener('click',function(ev){ev.stopPropagation();archiveSession(s.id);});
+    var del=document.createElement('button');del.className='abtn danger';del.textContent='×';del.title='删除';
+    del.addEventListener('click',function(ev){ev.stopPropagation();deleteSession(s.id);});
+    acts.appendChild(rn);acts.appendChild(ar);acts.appendChild(del);d.appendChild(acts);
+  }
+  d.addEventListener('click',function(){openSession(s.id,isMain?'主要聊天':sideTitle(s));closeSidebar();});
+  sessionsEl.appendChild(d);
+}
 async function refreshSessions(){
   try{
     var r=await fetch('/api/sessions'); if(!r.ok) return;
-    var list=await r.json();
+    var data=await r.json();
     sessionsEl.innerHTML='';
-    list.forEach(function(s){
-      var d=document.createElement('div');
-      d.className='sess'+(s.id===currentSessionId?' active':'');
-      var t=document.createElement('span');t.className='t';t.textContent=s.title||'新的对话';t.title=t.textContent;
-      var del=document.createElement('button');del.className='del';del.textContent='×';del.title='删除';
-      del.addEventListener('click',function(ev){ev.stopPropagation();deleteSession(s.id);});
-      d.appendChild(t);d.appendChild(del);
-      d.addEventListener('click',function(){openSession(s.id,s.title||'新的对话');closeSidebar();});
-      sessionsEl.appendChild(d);
+    if(data.main){mainSessionId=data.main.id;sessRow(data.main,true);}
+    groupSides(data.sides||[]).forEach(function(g){
+      var h=document.createElement('div');h.className='sgrp';h.textContent=g.label;
+      sessionsEl.appendChild(h);
+      g.items.forEach(function(s){sessRow(s,false);});
     });
   }catch(_){/* offline */}
+}
+/* 删/归档当前会话后回到主要聊天（复用现有历史加载逻辑）。 */
+function backToMain(){
+  if(mainSessionId){openSession(mainSessionId,'主要聊天');return true;}
+  currentSessionId=null;topTitle.textContent='新的对话';clearMsgs();showEmpty();return false;
 }
 async function deleteSession(id){
   if(!confirm('确定删除这个对话吗？')) return;
   await fetch('/api/sessions/'+encodeURIComponent(id),{method:'DELETE'});
-  if(id===currentSessionId){currentSessionId=null;topTitle.textContent='新的对话';clearMsgs();showEmpty();}
+  if(id===currentSessionId){if(!backToMain()) refreshSessions();}
+  else refreshSessions();
+}
+async function renameSession(id,oldTitle){
+  var name=prompt('旁聊新标题：',oldTitle);
+  if(name===null) return;
+  await fetch('/api/sessions/'+encodeURIComponent(id),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:name})});
   refreshSessions();
+}
+async function archiveSession(id){
+  if(!confirm('归档这个旁聊吗？它将从列表中隐藏（可在后台数据中保留）。')) return;
+  await fetch('/api/sessions/'+encodeURIComponent(id),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({archived_at:true})});
+  if(id===currentSessionId){if(!backToMain()) refreshSessions();}
+  else refreshSessions();
 }
 async function openSession(id,title){
   currentSessionId=id;topTitle.textContent=title;clearMsgs();refreshSessions();
@@ -383,8 +438,13 @@ async function openSession(id,title){
     scrollBottom();
   }catch(_){addErrorMsg('加载历史消息失败');}
 }
-function newChat(){
-  currentSessionId=null;topTitle.textContent='新的对话';
+/* ＋ 旁聊：服务端建一条 kind='side' 的会话并立即切换；首条消息发出、完整回复后服务端自动起标题。 */
+async function newSideChat(){
+  try{
+    var r=await fetch('/api/sessions',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+    var d=await r.json();
+    currentSessionId=d.id;topTitle.textContent='新的对话';
+  }catch(_){currentSessionId=null;}
   clearMsgs();showEmpty();refreshSessions();closeSidebar();inputEl.focus();
 }
 /* ---------- send (SSE) ---------- */
@@ -429,8 +489,9 @@ async function doSend(){
         try{
           var o=JSON.parse(p);
           if(o.sessionId&&!sid){sid=o.sessionId;currentSessionId=sid;refreshSessions();}
-          else if(o.t==='tool_start'){toolStart(body,o);}
-          else if(o.t==='tool_end'){toolEnd(body,o);}
+          // P1-3: 工具活动叙事由 toolsteps.js 渲染（openmuse:tool 事件）；旧 toolStart/toolEnd 不再调用，避免双重渲染
+          else if(o.t==='tool_start'){window.dispatchEvent(new CustomEvent('openmuse:tool',{detail:{phase:'start',id:o.id,label:o.label}}));}
+          else if(o.t==='tool_end'){window.dispatchEvent(new CustomEvent('openmuse:tool',{detail:{phase:'end',id:o.id,label:o.label,ok:o.ok,output:o.output,summary:o.summary}}));}
           else if(o.t==='artifact'){window.dispatchEvent(new CustomEvent('openmuse:artifact',{detail:o}));}
           else if(o.token){raw+=o.token;scheduleRender();}
           else if(o.error){body.closest('.msg').remove();addErrorMsg(o.error);finished=true;}
@@ -446,6 +507,7 @@ async function doSend(){
     addErrorMsg('网络错误：'+e.message);
   }
   setBusy(false);autoscroll();
+  refreshSessions(); /* 捡起服务端自动起的旁聊标题 */
   if(memOpen) refreshMemories();
 }
 /* ---------- composer ---------- */
@@ -455,7 +517,7 @@ inputEl.addEventListener('keydown',function(e){
   if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();doSend();}
 });
 sendBtn.addEventListener('click',doSend);
-$('newChat').addEventListener('click',newChat);
+$('newSide').addEventListener('click',newSideChat);
 /* mobile sidebar */
 var sidebar=$('sidebar'), overlay=$('overlay');
 function closeSidebar(){sidebar.classList.remove('open');overlay.classList.remove('show');}
@@ -490,8 +552,9 @@ function renderUserChip(user){
 showEmpty();bootAuth();refreshSessions();refreshSandboxStatus();autosize();
 setInterval(refreshSandboxStatus,60000);
 </script>
-<!-- P1: artifacts 画布面板 + 后台任务面板（Worker B/C 自包含脚本） -->
+<!-- P1: artifacts 画布面板 + 后台任务面板 + 工具步骤流（Worker B/C / Worker 2 自包含脚本） -->
 <script src="/artifact-panel.js"></script>
 <script src="/task-panel.js"></script>
+<script src="/toolsteps.js"></script>
 </body>
 </html>

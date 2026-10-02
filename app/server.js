@@ -17,6 +17,8 @@ const artifacts = require('./lib/artifacts');
 const { registerArtifactRoutes } = require('./lib/artifactRoutes');
 const scheduler = require('./lib/scheduler');
 const { registerTaskRoutes } = require('./lib/taskRoutes');
+// 主聊/旁聊纯逻辑（groupSides/fallbackTitle，见 test/sidechat.test.js）
+const sidechat = require('./lib/sidechat');
 
 const PORT = Number(process.env.PORT) || 3000;
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || '';
@@ -94,6 +96,18 @@ async function initDb() {
   await pool.query(
     `CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions (user_id, created_at DESC)`
   );
+  // 主聊/旁聊：kind='main'（每用户一条，懒创建）/kind='side'（旁聊）。
+  // 老数据 kind 默认为 'side'，自然成为旁聊，不迁移、不改动。
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'side'`);
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS title TEXT`);
+  await pool.query(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ`);
+  await pool.query(
+    `CREATE INDEX IF NOT EXISTS sessions_user_kind_idx ON sessions (user_id, kind, created_at DESC)`
+  );
+  // 每用户最多一条主聊：防并发懒创建产生重复 main（部分唯一索引）
+  await pool.query(
+    `CREATE UNIQUE INDEX IF NOT EXISTS sessions_user_main_uniq ON sessions (user_id) WHERE kind = 'main'`
+  );
   // better-auth 表（user / session / account / verification，均为单数，与
   // 现有的聊天 sessions（复数）表不冲突）。表名/列名取自 better-auth 1.7.7
   // 默认 schema（id text 主键，string→text，boolean→boolean，date→timestamptz）。
@@ -166,20 +180,114 @@ app.get('/api/auth-config', (req, res) => {
   res.json({ authEnabled: authLib.isAuthEnabled(), providers: authLib.authProviders() });
 });
 
+// 主聊懒取/懒创建：每用户一条 kind='main' 的 session（title='主要聊天'）。
+async function getOrCreateMainSession(userId) {
+  const found = await pool.query(
+    `SELECT id, title, created_at FROM sessions WHERE user_id = $1 AND kind = 'main' LIMIT 1`,
+    [userId]
+  );
+  if (found.rowCount > 0) return found.rows[0];
+  const id = crypto.randomUUID();
+  const { rows } = await pool.query(
+    `INSERT INTO sessions (id, title, user_id, kind) VALUES ($1, '主要聊天', $2, 'main')
+     RETURNING id, title, created_at`,
+    [id, userId]
+  );
+  return rows[0];
+}
+
+const DEEPSEEK_CHAT_URL = 'https://api.deepseek.com/v1/chat/completions';
+
+// 旁聊自动标题：仅对 kind='side' 且标题为空的 session 生效。
+// 首次完整回复后由 /api/chat 在 SSE 结束后 fire-and-forget 调用：DeepSeek 生成
+// ≤12 字标题（15s 超时），失败/超时则回退到首条用户消息前 18 字。
+// 绝不阻塞 SSE：调用方必须以 promise + catch 吞错的方式后台跑。
+async function maybeAutoTitle(userId, sessionId, firstUserMsg) {
+  if (!pool || !DEEPSEEK_API_KEY || !firstUserMsg) return;
+  // 只有无标题的旁聊才需要自动标题；主聊/已有标题/已删除的一律跳过。
+  try {
+    const s = await pool.query(
+      `SELECT title FROM sessions WHERE id = $1 AND user_id = $2 AND kind = 'side'`,
+      [sessionId, userId]
+    );
+    if (s.rowCount === 0) return;
+    if (String(s.rows[0].title || '').trim()) return;
+  } catch (_) {
+    return;
+  }
+  let title = sidechat.fallbackTitle(firstUserMsg);
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 15000);
+    let gen = '';
+    try {
+      const res = await fetch(DEEPSEEK_CHAT_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer ' + DEEPSEEK_API_KEY,
+        },
+        signal: ctrl.signal,
+        body: JSON.stringify({
+          model: 'deepseek-chat',
+          messages: [
+            {
+              role: 'system',
+              content:
+                '给这段对话起一个简洁的中文标题，不超过12个汉字，只输出标题本身，不要引号、不要解释、不要标点结尾。',
+            },
+            { role: 'user', content: String(firstUserMsg).slice(0, 500) },
+          ],
+          temperature: 0.5,
+          max_tokens: 30,
+        }),
+      });
+      if (!res.ok) throw new Error('status ' + res.status);
+      const j = await res.json();
+      gen = (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || '';
+    } finally {
+      clearTimeout(timer);
+    }
+    // 清理：去首尾引号/空白/句末标点，硬截 12 字。
+    gen = String(gen)
+      .trim()
+      .replace(/^["'「『（(【]/, '')
+      .replace(/["'」』）)】]$/, '')
+      .replace(/[，。！？；：、…\s]+$/, '');
+    gen = Array.from(gen).slice(0, 12).join('').trim();
+    if (gen) title = gen;
+  } catch (_) {
+    // 超时/失败 → 保留 fallbackTitle（首条用户消息前 18 字）
+  }
+  try {
+    await pool.query('UPDATE sessions SET title = $1 WHERE id = $2 AND user_id = $3', [
+      title,
+      sessionId,
+      userId,
+    ]);
+    console.log('[openmuse] side chat auto title set:', title);
+  } catch (e) {
+    console.error('[openmuse] auto title update failed:', e.message);
+  }
+}
+
 app.get('/api/sessions', requireDb, requireUser, async (req, res) => {
   try {
-    const { rows } = await pool.query(
+    const main = await getOrCreateMainSession(req.userId);
+    // sessions 表无 updated_at 列，沿用旧逻辑：按最近消息/创建时间倒序（最近活跃在前）。
+    const { rows: sides } = await pool.query(
       `
-      SELECT s.id, s.title, s.created_at
+      SELECT s.id, s.title, s.created_at,
+             COALESCE(MAX(m.created_at), s.created_at) AS last_active
       FROM sessions s
       LEFT JOIN messages m ON m.session_id = s.id
-      WHERE s.user_id = $1
+      WHERE s.user_id = $1 AND s.kind = 'side' AND s.archived_at IS NULL
       GROUP BY s.id
       ORDER BY COALESCE(MAX(m.created_at), s.created_at) DESC
     `,
       [req.userId]
     );
-    res.json(rows);
+    res.json({ main, sides });
   } catch (e) {
     res.status(500).json({ error: 'db_error', message: e.message });
   }
@@ -188,13 +296,55 @@ app.get('/api/sessions', requireDb, requireUser, async (req, res) => {
 app.post('/api/sessions', requireDb, requireUser, async (req, res) => {
   try {
     const id = crypto.randomUUID();
-    const title = (req.body && typeof req.body.title === 'string' && req.body.title.trim()) || '新的对话';
-    await pool.query('INSERT INTO sessions (id, title, user_id) VALUES ($1, $2, $3)', [
+    // 新建旁聊：title 未传/为空时保持 null，由自动标题流程在首次回复后补上。
+    const raw = req.body && typeof req.body.title === 'string' ? req.body.title.trim() : '';
+    const title = raw || null;
+    await pool.query('INSERT INTO sessions (id, title, user_id, kind) VALUES ($1, $2, $3, $4)', [
       id,
       title,
       req.userId,
+      'side',
     ]);
     res.json({ id });
+  } catch (e) {
+    res.status(500).json({ error: 'db_error', message: e.message });
+  }
+});
+
+// 重命名 / 归档：archived_at=true 打时间戳归档，false 取消归档（不常用）。
+app.patch('/api/sessions/:id', requireDb, requireUser, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const sets = [];
+    const params = [];
+    if (typeof body.title === 'string') {
+      sets.push(`title = $${params.length + 1}`);
+      params.push(body.title.trim() || null);
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'archived_at')) {
+      if (body.archived_at === false) {
+        sets.push('archived_at = NULL');
+      } else if (body.archived_at === true) {
+        sets.push('archived_at = now()');
+      } else {
+        sets.push(`archived_at = $${params.length + 1}`);
+        params.push(body.archived_at);
+      }
+    }
+    if (!sets.length) {
+      return res
+        .status(400)
+        .json({ error: 'empty_patch', message: 'title 或 archived_at 至少提供一个' });
+    }
+    params.push(req.params.id, req.userId);
+    const r = await pool.query(
+      `UPDATE sessions SET ${sets.join(', ')} WHERE id = $${params.length - 1} AND user_id = $${
+        params.length
+      }`,
+      params
+    );
+    if (r.rowCount === 0) return res.status(404).json({ error: 'not_found', message: '会话不存在' });
+    res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: 'db_error', message: e.message });
   }
@@ -267,6 +417,8 @@ app.post('/api/chat', requireDb, requireUser, async (req, res) => {
 
   try {
     // Ensure session exists and belongs to this user (create on demand).
+    // 没传 sessionId → 落到该用户的 main session（懒创建）；
+    // 传了但不存在/不属于该用户 → 沿旧行为新建一个旁聊（kind='side'）。
     let sessionExists = false;
     if (sessionId) {
       const s = await pool.query('SELECT id FROM sessions WHERE id = $1 AND user_id = $2', [
@@ -275,14 +427,19 @@ app.post('/api/chat', requireDb, requireUser, async (req, res) => {
       ]);
       sessionExists = s.rowCount > 0;
     }
-    if (!sessionExists) {
+    if (sessionExists) {
+      // 传了合法 sessionId：现有行为，原样沿用。
+    } else if (sessionId) {
       sessionId = crypto.randomUUID();
       const title = Array.from(message).slice(0, 24).join('') || '新的对话';
-      await pool.query('INSERT INTO sessions (id, title, user_id) VALUES ($1, $2, $3)', [
+      await pool.query("INSERT INTO sessions (id, title, user_id, kind) VALUES ($1, $2, $3, 'side')", [
         sessionId,
         title,
         req.userId,
       ]);
+    } else {
+      const main = await getOrCreateMainSession(req.userId);
+      sessionId = main.id;
     }
 
     await pool.query('INSERT INTO messages (session_id, role, content) VALUES ($1, $2, $3)', [
@@ -363,6 +520,13 @@ app.post('/api/chat', requireDb, requireUser, async (req, res) => {
     }
     if (!clientGone) res.write('data: [DONE]\n\n');
     res.end();
+
+    // 旁聊自动标题（fire-and-forget，不阻塞 SSE；异常只打日志）
+    if (full && DEEPSEEK_API_KEY) {
+      maybeAutoTitle(req.userId, sessionId, message).catch((e) =>
+        console.error('[openmuse] auto title error:', e && e.message)
+      );
+    }
 
     // v1.1: 长期记忆提取（fire-and-forget，异常只打日志）
     // 条件：本 session 用户消息>=2 条且最后一条用户消息长度>15，避免噪音

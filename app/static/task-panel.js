@@ -365,4 +365,14 @@
   } else {
     boot();
   }
+  // P2-5：Esc 关闭任务抽屉（输入框聚焦时不抢）
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    var t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+    if (panelEl && panelEl.classList.contains('open')) {
+      panelEl.classList.remove('open');
+      e.stopPropagation();
+    }
+  });
 })();
