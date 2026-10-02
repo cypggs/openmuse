@@ -657,13 +657,30 @@ registerArtifactRoutes(app, { pool, requireUser });
 if (pool) registerTaskRoutes(app, { pool, requireUser });
 
 // ---------- static ----------
-// 静态资源缓存策略：边缘 CDN 会把 max-age 提到最低 4h（实测 maxAge:0 也被改写
-// 成 max-age=14400），只有 no-store 能穿透。因此全部静态文件 no-store。
-// 教训：之前用默认 4h 强缓存，导致发版后回访用户（及审计浏览器）拿到旧 JS，
-// 表现就是"部署了但新功能没生效"。本应用流量小，正确性优先于缓存收益。
+// 静态资源缓存策略（2026-10-02 血泪教训）：
+// 边缘层会把 .js 等静态资源的 Cache-Control 改写为 public,max-age=14400（4h），
+// no-store 都穿透不了。于是改用「路径指纹」：/a/<ver>/x.js，ver = 全部 js 内容的
+// md5(8)。内容一变 URL 就变，任何 CDN/浏览器缓存都不可能拿到旧文件。
+// index.html 本身走 no-store（边缘对此放行），每次进站都拿到最新的指纹 URL。
+const STATIC_DIR = path.join(__dirname, 'static');
+const { assetVersion, renderIndexHtml } = require('./lib/assets');
+const ASSET_VER = assetVersion(STATIC_DIR);
+const INDEX_HTML = renderIndexHtml(STATIC_DIR, ASSET_VER);
+// 指纹 URL：内容寻址，可永久缓存（边缘的 4h 改写不再是问题）
 app.use(
-  express.static(path.join(__dirname, 'static'), {
+  '/a/:ver',
+  express.static(STATIC_DIR, {
+    maxAge: '1y',
+    immutable: true,
+    index: false,
+  })
+);
+// 兼容老 URL（书签/硬编码），保持 no-store 尽力而为；
+// index:false 让 / 落到下面的 catch-all，拿到指纹替换后的版本
+app.use(
+  express.static(STATIC_DIR, {
     maxAge: 0,
+    index: false,
     setHeaders(res) {
       res.setHeader('Cache-Control', 'no-store');
     },
@@ -671,7 +688,7 @@ app.use(
 );
 app.get('*', (req, res) => {
   if (req.path.startsWith('/api/')) return res.status(404).json({ error: 'not_found' });
-  res.sendFile(path.join(__dirname, 'static', 'index.html'));
+  res.set('Cache-Control', 'no-store').type('html').send(INDEX_HTML);
 });
 
 async function boot() {
