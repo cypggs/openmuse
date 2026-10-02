@@ -38,6 +38,7 @@ if (DATABASE_URL) {
   memory.setPool(pool);
   artifacts.setPool(pool);
   scheduler.setPool(pool);
+  require('./lib/browser').setPool(pool);
 } else {
   console.warn('[openmuse] DATABASE_URL 未设置：以无持久化模式运行，会话与消息不会保存');
 }

@@ -8,6 +8,7 @@
 'use strict';
 
 const sandbox = require('./sandbox');
+const browser = require('./browser');
 // P1: 联网工具（Worker A）与 artifacts 画布（Worker B），零新依赖
 const web = require('./web');
 const artifacts = require('./artifacts');
@@ -133,6 +134,82 @@ const TOOLS = [
   },
   // P1 artifacts 画布（Worker B）
   ...artifacts.ARTIFACT_TOOLS,
+  // P1 browser-driver（E2B desktop）
+  {
+    type: 'function',
+    function: {
+      name: 'browser_navigate',
+      description:
+        '在云电脑的浏览器中打开网页。敏感站点（github/google/邮箱等）会触发用户审批。',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: '要打开的 URL（http/https）' },
+        },
+        required: ['url'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_snapshot',
+      description:
+        '获取当前页面的可访问性树（文本快照），包含可交互元素的 ref 引用。先 snapshot 再 click/fill。',
+      parameters: { type: 'object', properties: {} },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_click',
+      description: '点击页面元素。ref 来自 browser_snapshot 的 [eN] 引用。',
+      parameters: {
+        type: 'object',
+        properties: {
+          ref: { type: 'string', description: '元素引用，如 e3' },
+        },
+        required: ['ref'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_fill',
+      description:
+        '在输入框填入文本（非凭证）。ref 来自 browser_snapshot。密码等凭证不要用这个工具。',
+      parameters: {
+        type: 'object',
+        properties: {
+          ref: { type: 'string', description: '输入框引用，如 e5' },
+          text: { type: 'string', description: '要填入的文本' },
+        },
+        required: ['ref', 'text'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_press',
+      description: '按键盘按键，如 Enter、Escape、Tab、ArrowDown 等。',
+      parameters: {
+        type: 'object',
+        properties: {
+          key: { type: 'string', description: '按键名，默认 Enter' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_screenshot',
+      description: '对当前浏览器页面截图（PNG）。用于向用户展示或调试。',
+      parameters: { type: 'object', properties: {} },
+    },
+  },
 ];
 
 function truncate(s, n) {
@@ -263,6 +340,35 @@ async function executeToolInner(name, args, userId, sessionId) {
       case 'sandbox_write_file': {
         const r = await sandbox.writeFile(userId, String(args.path || ''), String(args.content || ''));
         return { ok: true, output: '已写入 ' + r.path };
+      }
+      // P1 browser-driver
+      case 'browser_navigate': {
+        const r = await browser.navigate(userId, String(args.url || ''), { sessionId });
+        return { ok: true, output: `已打开 ${r.url || args.url}${r.title ? `（${r.title}）` : ''}` };
+      }
+      case 'browser_snapshot': {
+        const r = await browser.snapshot(userId);
+        let out = `# ${r.title || ''}\n${r.url || ''}\n\n${r.snapshot || ''}`;
+        if (r.truncated) out += '\n\n（快照过长已截断）';
+        if (r.login_form_detected) out += '\n\n[检测到登录表单：username/password 字段，需用户审批后才可填入]';
+        return { ok: true, output: truncate(out, TOOL_OUTPUT_LIMIT) };
+      }
+      case 'browser_click': {
+        await browser.click(userId, String(args.ref || ''));
+        return { ok: true, output: `已点击 ${args.ref}` };
+      }
+      case 'browser_fill': {
+        await browser.fill(userId, String(args.ref || ''), String(args.text || ''));
+        return { ok: true, output: `已在 ${args.ref} 填入文本` };
+      }
+      case 'browser_press': {
+        await browser.press(userId, String(args.key || 'Enter'));
+        return { ok: true, output: `已按键 ${args.key || 'Enter'}` };
+      }
+      case 'browser_screenshot': {
+        const buf = await browser.screenshot(userId);
+        // 以 artifact 形式返回截图（前端可展示）
+        return { ok: true, output: '[截图已捕获]', screenshot: buf.toString('base64') };
       }
       default:
         return { ok: false, output: '未知工具：' + name };

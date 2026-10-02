@@ -84,6 +84,9 @@ function isNotFoundError(e) {
 // JS SDK 等价于 autoPause 的写法：超时后 pause 而非 kill，流量可自动 resume。
 function createOpts(userId) {
   return {
+    // P1: 浏览器能力需要 desktop 模板（Chrome + Xvfb + noVNC）。
+    // "每用户一台电脑"：用户的 sandbox 即 desktop，代码工具照常可用（Node 20）。
+    template: 'openmuse-desktop',
     timeoutMs: LIFETIME_MS,
     metadata: { owner: 'openmuse', userId: String(userId) },
     lifecycle: { onTimeout: 'pause', autoResume: true },
