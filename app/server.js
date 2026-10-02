@@ -657,17 +657,15 @@ registerArtifactRoutes(app, { pool, requireUser });
 if (pool) registerTaskRoutes(app, { pool, requireUser });
 
 // ---------- static ----------
-// 静态资源缓存策略：maxAge=0 让浏览器/CDN 每次都带 ETag 回源校验（304 便宜且正确）。
+// 静态资源缓存策略：边缘 CDN 会把 max-age 提到最低 4h（实测 maxAge:0 也被改写
+// 成 max-age=14400），只有 no-store 能穿透。因此全部静态文件 no-store。
 // 教训：之前用默认 4h 强缓存，导致发版后回访用户（及审计浏览器）拿到旧 JS，
 // 表现就是"部署了但新功能没生效"。本应用流量小，正确性优先于缓存收益。
-// index.html 用 no-store，永不缓存，确保入口永远最新。
 app.use(
   express.static(path.join(__dirname, 'static'), {
     maxAge: 0,
-    setHeaders(res, filePath) {
-      if (filePath.endsWith('.html')) {
-        res.setHeader('Cache-Control', 'no-store');
-      }
+    setHeaders(res) {
+      res.setHeader('Cache-Control', 'no-store');
     },
   })
 );
