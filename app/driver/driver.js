@@ -17,8 +17,22 @@ let page = null;
 
 async function ensureBrowser() {
   if (page && !page.isClosed()) return page;
+  // 优先连模板开机启动的 Chrome（CDP 9222，对标 agentbox）
+  try {
+    console.log('[driver] trying CDP connect to :9222...');
+    const cdpBrowser = await chromium.connectOverCDP('http://127.0.0.1:9222', { timeout: 5000 });
+    const contexts = cdpBrowser.contexts();
+    if (contexts[0]) {
+      context = contexts[0];
+      page = context.pages()[0] || await context.newPage();
+      console.log('[driver] Chrome connected via CDP');
+      return page;
+    }
+  } catch (e) {
+    console.log('[driver] CDP connect failed, falling back to launch:', e.message.slice(0, 80));
+  }
+  // Fallback：老模板没有开机 Chrome，自己 launch（persistent profile）
   console.log('[driver] launching Chrome (display ' + DISPLAY + ')...');
-  // persistent context：profile 落盘，pause/resume 后登录态保留
   context = await chromium.launchPersistentContext(USER_DATA_DIR, {
     headless: false,
     executablePath: '/usr/bin/google-chrome',
@@ -31,9 +45,8 @@ async function ensureBrowser() {
     ],
     viewport: { width: 1280, height: 800 },
   });
-  browser = context; // persistent context 即 browser
   page = context.pages()[0] || await context.newPage();
-  console.log('[driver] Chrome ready');
+  console.log('[driver] Chrome launched');
   return page;
 }
 
@@ -210,6 +223,12 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log('[driver] listening on 127.0.0.1:' + PORT);
+  // 开机即启动浏览器（非懒加载）："一台电脑"体验，ps 能看到 chrome 进程
+  ensureBrowser().then(() => {
+    console.log('[driver] browser auto-started at boot');
+  }).catch((e) => {
+    console.error('[driver] browser auto-start failed:', e.message);
+  });
 });
 
 // 优雅退出
