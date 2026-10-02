@@ -49,8 +49,6 @@ function handleWsHandshake(req, sock) {
   sock.on('data', (d) => handleWsFrame(client, d));
   sock.on('close', () => { clients.delete(client); log('ws client gone, total:', clients.size); });
   sock.on('error', () => { clients.delete(client); });
-  // 发送 SPS/PPS 配置（首个 IDR 前）
-  if (spsPps) sendBinary(client, spsPps);
 }
 
 function handleWsFrame(client, data) {
@@ -131,7 +129,6 @@ async function handleInput(json) {
 }
 
 // ---- GStreamer ----
-let spsPps = null;
 function startGst() {
   const args = [
     '-q',
@@ -154,30 +151,10 @@ function startGst() {
   });
   gst.on('exit', (c) => { log('gst exited', c, 'restarting in 2s'); setTimeout(startGst, 2000); });
 
-  // 解析 H264 byte-stream，提取 NAL 单元
-  let buf = Buffer.alloc(0);
+  // 直接转发原始 H264 字节流（Annex B），前端 JMuxer 负责解析
+  // 不做 NAL 切分，避免解析 bug
   gst.stdout.on('data', (d) => {
-    buf = Buffer.concat([buf, d]);
-    // 按 start code (0x000001) 切分 NAL
-    let start = 0;
-    while (true) {
-      const idx = buf.indexOf(Buffer.from([0, 0, 1]), start);
-      if (idx < 0) break;
-      if (start > 0 || idx > 0) {
-        const nal = buf.slice(start === 0 ? 0 : start, idx);
-        if (nal.length > 4) {
-          const nalType = nal[3] & 0x1f; // 去掉 0x000001 前缀后的第一个字节
-          // 7=SPS, 8=PPS, 5=IDR
-          if (nalType === 7 || nalType === 8) {
-            spsPps = spsPps ? Buffer.concat([spsPps, Buffer.from([0,0,1]), nal.slice(3)]) : nal;
-          }
-          if (clients.size > 0) broadcastH264(nal);
-        }
-      }
-      start = idx + 3;
-    }
-    if (start > 0) buf = buf.slice(start);
-    if (buf.length > 1024 * 1024) buf = buf.slice(-1024); // 防止内存泄漏
+    if (clients.size > 0) broadcastH264(d);
   });
 }
 
