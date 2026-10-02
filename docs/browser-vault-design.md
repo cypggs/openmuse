@@ -197,14 +197,38 @@ vault_credentials(user_id, site, username_enc, password_enc, iv, tag,
 - **密钥体系**：per-user DEK 信封加密（KEK 在 env，未来可接 KMS）；轮换流程文档化。
 - **截图脱敏**：密码字段聚焦/填入期间的 screenshot 打码或跳过（P1 做了跳过，P4 做字段级打码）。
 
-## 8. 成本与规格（待验证项）
+## 8. 成本与规格（2026-10-02 P1 spike 实测结论）
 
-- pause 不计费是成本关键：浏览器平时休眠，任务时 resume（实测约 2.4s）。
-  每用户 1 browser = 复用已有 sandbox，无新增常驻费用。
-- P1 前必须实测回答：
-  1. 默认规格跑 XFCE + Chrome 是否可用（内存 1GB 存疑）。
-  2. 模板能否指定 cpu/ram；不能则走套餐升级，费用记入定价模型。
-  3. `e2b-dev/desktop` 模板在当前 E2B SDK (2.52.0) 下 `template build` 是否一次成功。
+> 以下为生产容器内实测（`insta compute exec` + E2B SDK），非文档推测。
+
+### 实测数据
+
+| 项目 | 结果 |
+|---|---|
+| 默认 sandbox 规格 | **2 CPU / 478 MB**（低于文档称的 1G；Debian 12） |
+| 默认规格 + Chrome 154 | ❌ 跑不起来：headless 截图挂起 60s 被杀；`--single-process` exit=0 但无输出 |
+| 模板指定规格 | ✅ `Template.build(tpl, name, {cpuCount: 2, memoryMB: 4096})` 一次成功 |
+| 新模板起 sandbox | ✅ `nproc`=2，`free`=**3931 MB**（4096 扣除系统保留），规格如实生效 |
+| 模板构建方式 | ✅ SDK `Template.build` 可用；CLI 亦支持 `--cpu-count/--memory-mb` |
+
+### 结论
+
+1. **浏览器必须走自定义模板 + 4G 内存**：默认 478MB 连 headless Chrome 截图都完不成，
+   不是"慢"而是"不可用"。`--memory-mb 4096` 为必选，非可选。
+2. **Q1/Q2/Q3 全部 answered**：Q1（默认规格不行）/ Q2（模板可定规格）/ Q3（构建一次成功）。
+3. 本沙盒直连 E2B 有代理兼容问题（SDK/CLI 的 undici 不走代理，TLS 报 wrong version）；
+   spike 改从生产容器（`insta compute exec`）执行，E2B SDK 在生产侧工作正常。
+   日常开发不受影响（openmuse 后端本就跑在生产侧）。
+
+### 待办（P1 实施前）
+
+- [ ] 按 `docs/browser-vault-design.md` §4.1 构建完整 desktop 模板
+      （基于 `e2b-dev/desktop` 精简：Xvfb + Chrome + x11vnc + noVNC + Node 20，
+      去掉 LibreOffice/Firefox/VSCode 以控制构建时间；spike 用 Dockerfile 已备好
+      `~/workspace/spike-test/template/`）。
+- [ ] 在 4G 模板上实测 Chrome headless 截图 + Xvfb headed 运行（spike 只验证到规格生效）。
+- [ ] 去 e2b.dev/pricing 核对 2C/4G 的计费（spike 未覆盖价格）。
+- [ ] 测试模板 `openmuse-spike-minimal` 为 spike 产物，可删除。
 
 ## 9. 实施顺序与依赖
 
