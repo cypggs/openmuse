@@ -248,8 +248,28 @@ async function getSandbox(userId) {
   if (!E2B_API_KEY) throw new Error('E2B_API_KEY 未配置，云电脑不可用');
   const existing = await findExisting(userId);
   if (existing) {
-    await heartbeat(existing);
-    return existing;
+    // 硬检查：确认是 desktop 模板（防 DB 记录与实际不符）
+    // 老 478MB 模板没有 /opt/noVNC，必须迁移
+    try {
+      const chk = await existing.commands.run('test -d /opt/noVNC && echo DESKTOP || echo OLD', { timeoutMs: 10000 });
+      if (chk.stdout.trim() !== 'DESKTOP') {
+        console.log(`[openmuse] user=${userId} sandbox 不是 desktop 模板，强制迁移`);
+        try { await existing.kill().catch(() => {}); } catch (_) {}
+        live.delete(userId);
+        if (pool) {
+          await pool.query(`DELETE FROM user_sandboxes WHERE user_id = $1`, [userId]).catch(() => {});
+        }
+        // 掉到下面的新建逻辑
+      } else {
+        await heartbeat(existing);
+        return existing;
+      }
+    } catch (e) {
+      console.error('[openmuse] desktop check failed:', e.message);
+      // 检查失败也返回 existing，避免误杀
+      await heartbeat(existing);
+      return existing;
+    }
   }
 
   let snapshotId = null;
