@@ -463,10 +463,14 @@ if (typeof module !== 'undefined' && module.exports) {
       });
   }
 
+  // 面板首次打开时拉列表；若直接打开指定工件，openArtifact 会先把 firstOpen 置 false，
+  // 避免 showList 的异步返回覆盖掉工件渲染（2026-10-02 审计发现的竞态）
+  var firstOpen = true;
   function openArtifact(id) {
     body.innerHTML = '<div class="canvas-empty">加载中…</div>';
     fetchArtifact(id)
       .then(function (row) {
+        firstOpen = false;
         openPanel();
         showArtifact(row);
       })
@@ -608,8 +612,7 @@ if (typeof module !== 'undefined' && module.exports) {
     openArtifact(d.id);
   });
 
-  // 面板首次打开时拉列表
-  var firstOpen = true;
+  // 面板首次打开时拉列表（firstOpen 声明见 openArtifact 上方）
   var origSetOpen = setOpen;
   setOpen = function (open) {
     origSetOpen(open);
