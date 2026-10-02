@@ -19,6 +19,7 @@ const scheduler = require('./lib/scheduler');
 const { registerTaskRoutes } = require('./lib/taskRoutes');
 // 主聊/旁聊纯逻辑（groupSides/fallbackTitle，见 test/sidechat.test.js）
 const sidechat = require('./lib/sidechat');
+const approvals = require('./lib/approvals');
 
 const PORT = Number(process.env.PORT) || 3000;
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY || '';
@@ -107,6 +108,42 @@ async function initDb() {
   // 每用户最多一条主聊：防并发懒创建产生重复 main（部分唯一索引）
   await pool.query(
     `CREATE UNIQUE INDEX IF NOT EXISTS sessions_user_main_uniq ON sessions (user_id) WHERE kind = 'main'`
+  );
+  // P0: 审批机制（见 docs/browser-vault-design.md §3）
+  // approvals: 审批请求；standing_grants: "始终允许"；approval_audit: 审计（不记值）
+  await pool.query(`CREATE TABLE IF NOT EXISTS approvals (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    session_id TEXT,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    detail JSONB,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TIMESTAMPTZ DEFAULT now(),
+    decided_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ
+  )`);
+  await pool.query(
+    `CREATE INDEX IF NOT EXISTS approvals_user_status_idx ON approvals (user_id, status, created_at DESC)`
+  );
+  await pool.query(`CREATE TABLE IF NOT EXISTS standing_grants (
+    user_id TEXT NOT NULL,
+    scope_kind TEXT NOT NULL,
+    scope_value TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (user_id, scope_kind, scope_value)
+  )`);
+  await pool.query(`CREATE TABLE IF NOT EXISTS approval_audit (
+    id SERIAL PRIMARY KEY,
+    approval_id TEXT,
+    user_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    site TEXT,
+    decision TEXT NOT NULL,
+    decided_at TIMESTAMPTZ DEFAULT now()
+  )`);
+  await pool.query(
+    `CREATE INDEX IF NOT EXISTS approval_audit_user_idx ON approval_audit (user_id, decided_at DESC)`
   );
   // better-auth 表（user / session / account / verification，均为单数，与
   // 现有的聊天 sessions（复数）表不冲突）。表名/列名取自 better-auth 1.7.7
@@ -644,6 +681,79 @@ app.delete('/api/memories/:id', requireDb, requireUser, async (req, res) => {
   try {
     const n = await memory.deleteMemory(req.userId, req.params.id);
     if (!n) return res.status(404).json({ error: 'not_found', message: '记忆不存在' });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: 'db_error', message: e.message });
+  }
+});
+
+// ---------- approvals（审批 P0）----------
+// SSE 推送通道：前端页面加载时连接，审批请求/决定实时推送。
+app.get('/api/events', requireUser, (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  res.write(`data: ${JSON.stringify({ t: 'connected' })}\n\n`);
+  approvals.addSseClient(req.userId, res);
+  const hb = setInterval(() => {
+    try {
+      res.write(`: ping\n\n`);
+    } catch (_) {}
+  }, 30000);
+  req.on('close', () => {
+    clearInterval(hb);
+    approvals.removeSseClient(req.userId, res);
+  });
+});
+
+// 待处理审批（页面加载时拉取）
+app.get('/api/approvals/pending', requireDb, requireUser, async (req, res) => {
+  try {
+    res.json({ approvals: await approvals.pendingApprovals(pool, req.userId) });
+  } catch (e) {
+    res.status(500).json({ error: 'db_error', message: e.message });
+  }
+});
+
+// 用户决定：{ decision: 'allow_once' | 'allow_always' | 'deny' }
+app.post('/api/approvals/:id/decide', requireDb, requireUser, async (req, res) => {
+  try {
+    const { decision } = req.body || {};
+    const result = await approvals.decideApproval(pool, {
+      id: req.params.id,
+      userId: req.userId,
+      decision,
+    });
+    res.json({ ok: true, ...result });
+  } catch (e) {
+    const code = e.message === '审批不存在' ? 404 : e.message === 'decision 非法' ? 400 : 500;
+    res.status(code).json({ error: 'decide_failed', message: e.message });
+  }
+});
+
+// standing grants 查询/撤销（设置页用）
+app.get('/api/approvals/grants', requireDb, requireUser, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT scope_kind, scope_value, created_at FROM standing_grants WHERE user_id = $1 ORDER BY created_at DESC',
+      [req.userId]
+    );
+    res.json({ grants: rows });
+  } catch (e) {
+    res.status(500).json({ error: 'db_error', message: e.message });
+  }
+});
+
+app.delete('/api/approvals/grants', requireDb, requireUser, async (req, res) => {
+  try {
+    const { scope_kind, scope_value } = req.body || {};
+    await pool.query(
+      'DELETE FROM standing_grants WHERE user_id = $1 AND scope_kind = $2 AND scope_value = $3',
+      [req.userId, scope_kind, scope_value]
+    );
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: 'db_error', message: e.message });
