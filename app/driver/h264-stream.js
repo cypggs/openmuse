@@ -139,8 +139,6 @@ function startGst() {
     '!', 'queue', 'leaky=downstream', 'max-size-buffers=2',
     '!', 'x264enc', 'tune=zerolatency', 'speed-preset=ultrafast',
     'bframes=0', 'key-int-max=30', 'byte-stream=true',
-    '!', 'video/x-h264,profile=baseline,stream-format=byte-stream,alignment=au',
-    '!', 'h264parse', 'config-interval=-1',
     '!', 'fdsink', 'fd=1',
   ];
   log('starting gst-launch-1.0');
