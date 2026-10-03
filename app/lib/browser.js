@@ -158,42 +158,6 @@ async function screenshot(userId) {
 }
 
 /**
- * P2: 获取 noVNC Live View URL。
- * 经 E2B getHost(6080) 反代，直接可访问（MVP 无密码，P4 加 backend 反代审计）。
- */
-async function getLiveUrl(userId) {
-  const sbx = await ensureDriver(userId); // 确保 desktop 在跑
-  // 确保 websockify 正确 serve noVNC 文件（模板里的启动命令缺 --web 参数，405 的根因）
-  await ensureWebsockify(sbx);
-  const host = sbx.getHost(6080);
-  // noVNC 的 index.html 已 symlink 到 vnc.html
-  return `https://${host}/`;
-}
-
-/**
- * 确保 websockify 在 6080 上正确运行（带 --web serve 静态文件）。
- * 模板的 start-desktop.sh 里 websockify 缺 --web 参数，会导致 405。
- */
-async function ensureWebsockify(sbx) {
-  // 检查 6080 是否返回 200（注意：curl 失败时 -w 输出 000，不要再 echo，避免 "000000"）
-  const check = await sbx.commands.run(
-    'curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:6080/ 2>/dev/null; true'
-  );
-  const code = check.stdout.trim();
-  if (code === '200') return; // 正常
-
-  console.log(`[browser] websockify on 6080 returned ${code}, restarting with --web...`);
-  // 分两步：先杀旧的（单条命令，避免 pkill 匹配到自身），再启动新的
-  // 注意：用 /opt/noVNC/utils/websockify/run，不是 python3 -m websockify（模块未安装）
-  await sbx.commands.run('pkill -f "[w]ebsockify" 2>/dev/null; sleep 1; true', { timeoutMs: 10000 });
-  await sbx.commands.run(
-    'nohup /opt/noVNC/utils/websockify/run --web /opt/noVNC 6080 localhost:5900 > /tmp/websockify.log 2>&1 < /dev/null & ' +
-    'sleep 2; curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:6080/ 2>/dev/null; true',
-    { timeoutMs: 15000 }
-  );
-}
-
-/**
  * H264 推流 URL（对标 Memoh 的 GStreamer → H264 → 浏览器）。
  * 确保 h264-stream.js 在 sandbox 内运行，返回 wss:// 地址。
  * 前端用 WebCodecs 解码 H264 → canvas（传输层预留 WebRTC 替换位）。
@@ -303,7 +267,6 @@ module.exports = {
   fill,
   press,
   screenshot,
-  getLiveUrl,
   getStreamUrl,
   getTerminalUrl,
   DRIVER_PORT,

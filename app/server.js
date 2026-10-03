@@ -690,16 +690,6 @@ app.delete('/api/memories/:id', requireDb, requireUser, async (req, res) => {
   }
 });
 
-// P2: Live View URL（noVNC）
-app.get('/api/browser/live-url', requireUser, async (req, res) => {
-  try {
-    const browser = require('./lib/browser');
-    const url = await browser.getLiveUrl(req.userId);
-    res.json({ url });
-  } catch (e) {
-    res.status(500).json({ error: 'live_url_failed', message: e.message.slice(0, 200) });
-  }
-});
 
 // H264 推流（对标 Memoh）：WebSocket + WebCodecs，前端 <canvas> 渲染
 app.get('/api/stream/url', requireUser, async (req, res) => {
