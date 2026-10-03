@@ -254,6 +254,46 @@ async function getStreamUrl(userId) {
   return `wss://${host}/`;
 }
 
+/**
+ * 终端 WebSocket URL。
+ * 确保 terminal.js 在 sandbox 内运行，返回 wss:// 地址。
+ * 前端用 xterm.js 连接。
+ */
+const TERM_PORT = 8890;
+const TERM_REMOTE_PATH = '/home/user/terminal.js';
+
+async function ensureTerminal(sbx) {
+  const check = await sbx.commands.run(
+    'curl -s --max-time 3 http://127.0.0.1:8890/health 2>/dev/null || echo "DOWN"',
+    { timeoutMs: 8000 }
+  );
+  if (check.stdout.includes('"ok":true')) return;
+
+  console.log('[browser] terminal not running, starting...');
+  const src = fs.readFileSync(path.join(__dirname, '../driver/terminal.js'), 'utf8');
+  await sbx.files.write(TERM_REMOTE_PATH, src);
+  await sbx.commands.run('fuser -k 8890/tcp 2>/dev/null; sleep 1; true', { timeoutMs: 10000 });
+  await sbx.commands.run(
+    'nohup node /home/user/terminal.js > /tmp/terminal.log 2>&1 < /dev/null & sleep 2; true',
+    { timeoutMs: 15000 }
+  );
+  const verify = await sbx.commands.run(
+    'curl -s --max-time 3 http://127.0.0.1:8890/health 2>/dev/null || echo "DOWN"',
+    { timeoutMs: 8000 }
+  );
+  if (!verify.stdout.includes('"ok":true')) {
+    throw new Error('terminal 启动失败');
+  }
+  console.log('[browser] terminal started');
+}
+
+async function getTerminalUrl(userId) {
+  const sbx = await ensureDriver(userId);
+  await ensureTerminal(sbx);
+  const host = sbx.getHost(TERM_PORT);
+  return `wss://${host}/`;
+}
+
 module.exports = {
   setPool,
   ensureDriver,
@@ -265,6 +305,7 @@ module.exports = {
   screenshot,
   getLiveUrl,
   getStreamUrl,
+  getTerminalUrl,
   DRIVER_PORT,
   SENSITIVE_DOMAINS,
 };

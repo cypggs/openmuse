@@ -168,23 +168,6 @@
 
   window.__openmuseLiveView = open;
 
-  function addButton() {
-    var topbar = document.querySelector('.topbar');
-    if (!topbar || document.getElementById('liveviewBtn')) return;
-    var btn = document.createElement('button');
-    btn.id = 'liveviewBtn';
-    btn.className = 'lv-btn';
-    btn.title = '打开云电脑实时画面（H264 低延迟，可观看/接管）';
-    btn.textContent = '🖥️ 浏览器';
-    btn.addEventListener('click', open);
-    var chip = topbar.querySelector('.userchip');
-    if (chip) topbar.insertBefore(btn, chip);
-    else topbar.appendChild(btn);
-  }
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', addButton);
-  } else {
-    addButton();
-  }
-  setTimeout(addButton, 2000);
+  // 注意：顶栏按钮由 workspace.js 统一创建（💻 云电脑下拉菜单）
+  // 这里只暴露 __openmuseLiveView 供调用
 })();

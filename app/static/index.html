@@ -189,6 +189,14 @@ textarea::placeholder{color:var(--muted2)}
 .lv-loading,.lv-error{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:14px;text-align:center;line-height:2}
 .lv-error{color:var(--danger)}
 @media (max-width:768px){.lv-panel{inset:2% 2%}.lv-hint{display:none}}
+/* 工作区菜单（对标 Memoh 的视图切换） */
+.ws-menu{position:fixed;z-index:400;display:none;background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:6px;min-width:160px;box-shadow:0 8px 32px rgba(0,0,0,.5)}
+.ws-menu.open{display:block}
+.ws-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:8px;cursor:pointer;font-size:14px;color:var(--text)}
+.ws-item:hover{background:var(--panel)}
+.ws-icon{font-size:16px;width:24px;text-align:center}
+#terminalModal{position:fixed;inset:0;z-index:300;display:none}
+#terminalModal.open{display:block}
 </style>
 </head>
 <body>
@@ -603,8 +611,12 @@ setInterval(refreshSandboxStatus,60000);
 </script>
 <!-- P1: artifacts 画布面板 + 后台任务面板 + 工具步骤流（Worker B/C / Worker 2 自包含脚本） -->
 <script src="/a/__ASSET_VER__/approval.js"></script>
+<link rel="stylesheet" href="/a/__ASSET_VER__/xterm.min.css">
 <script src="/a/__ASSET_VER__/jmuxer.min.js"></script>
+<script src="/a/__ASSET_VER__/xterm.min.js"></script>
 <script src="/a/__ASSET_VER__/stream.js"></script>
+<script src="/a/__ASSET_VER__/terminal.js"></script>
+<script src="/a/__ASSET_VER__/workspace.js"></script>
 <script src="/a/__ASSET_VER__/artifact-panel.js"></script>
 <script src="/a/__ASSET_VER__/task-panel.js"></script>
 <script src="/a/__ASSET_VER__/toolsteps.js"></script>

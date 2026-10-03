@@ -712,6 +712,17 @@ app.get('/api/stream/url', requireUser, async (req, res) => {
   }
 });
 
+// 终端（对标 Memoh）：WebSocket + xterm.js，前端渲染
+app.get('/api/terminal/url', requireUser, async (req, res) => {
+  try {
+    const browser = require('./lib/browser');
+    const url = await browser.getTerminalUrl(req.userId);
+    res.json({ url, transport: 'pty-ws' });
+  } catch (e) {
+    res.status(500).json({ error: 'terminal_url_failed', message: e.message.slice(0, 200) });
+  }
+});
+
 // P2: 浏览器截图（PNG，供前端展示）
 app.get('/api/browser/screenshot', requireUser, async (req, res) => {
   try {
