@@ -86,7 +86,7 @@ function isNotFoundError(e) {
 // JS SDK 等价于 autoPause 的写法：超时后 pause 而非 kill，流量可自动 resume。
 function createOpts(userId) {
   return {
-    // P1: 浏览器能力需要 desktop 模板（Chrome + Xvfb + noVNC）。
+    // P1: 浏览器能力需要 desktop 模板（Chrome + Xvfb，H264 推流）。
     // "每用户一台电脑"：用户的 sandbox 即 desktop，代码工具照常可用（Node 20）。
     template: DESKTOP_TEMPLATE,
     timeoutMs: LIFETIME_MS,
@@ -260,9 +260,9 @@ async function getSandbox(userId) {
   let needMigration = false;
   if (existing) {
     // 硬检查：确认是 desktop 模板（防 DB 记录与实际不符）
-    // 老 478MB 模板没有 /opt/noVNC，必须迁移
+    // 老 478MB 模板没有 Chrome，必须迁移；v1/v2 desktop 模板都有 Chrome（v2 去掉了 noVNC，故不用 /opt/noVNC 做探针）
     try {
-      const chk = await existing.commands.run('test -d /opt/noVNC && echo DESKTOP || echo OLD', { timeoutMs: 10000 });
+      const chk = await existing.commands.run('test -x /usr/bin/google-chrome && echo DESKTOP || echo OLD', { timeoutMs: 10000 });
       if (chk.stdout.trim() !== 'DESKTOP') {
         console.log(`[openmuse] user=${userId} sandbox 不是 desktop 模板，强制迁移`);
         needMigration = true;

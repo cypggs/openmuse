@@ -160,7 +160,7 @@ async function screenshot(userId) {
 /**
  * H264 推流 URL（对标 Memoh 的 GStreamer → H264 → 浏览器）。
  * 确保 h264-stream.js 在 sandbox 内运行，返回 wss:// 地址。
- * 前端用 WebCodecs 解码 H264 → canvas（传输层预留 WebRTC 替换位）。
+ * 前端用 JMuxer(MSE) 解码 H264 → <video>（传输层预留 WebRTC 替换位）。
  */
 const fs = require('fs');
 const path = require('path');

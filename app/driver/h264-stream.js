@@ -1,8 +1,8 @@
 /**
  * openmuse H264 桌面推流服务（对标 Memoh 的 GStreamer pipeline）
  *
- * 链路：x11vnc(:5900 RFB) → gst-launch-1.0 (rfbsrc → x264enc → h264parse → fdsink)
- *       → Node 读 H264 NAL → WebSocket (8889) → 浏览器 WebCodecs → canvas
+ * 链路：x11vnc(:5900 RFB) → gst-launch-1.0 (rfbsrc → x264enc → fdsink)
+ *       → Node 读 H264 NAL → WebSocket (8889) → 浏览器 JMuxer(MSE) → <video>
  * 输入：WebSocket JSON → RFB PointerEvent/KeyEvent → x11vnc
  *
  * GStreamer pipeline 与 Memoh 的 H264 分支一致（除了末端用 fdsink 不用 udpsink）：
@@ -11,7 +11,8 @@
  *   ! queue leaky=downstream max-size-buffers=2
  *   ! x264enc tune=zerolatency speed-preset=ultrafast bframes=0 key-int-max=30 byte-stream=true
  *   ! video/x-h264,profile=baseline,stream-format=byte-stream,alignment=au
- *   ! h264parse config-interval=-1 ! fdsink fd=1
+ *   ! fdsink fd=1
+ * （注：已去掉 h264parse——输出 Annex B 直给 JMuxer；avcC 转换会导致黑屏，见 commit 0e4880d）
  *
  * 运行：node h264-stream.js (sandbox 内, WS_PORT=8889)
  * 传输层预留 WebRTC 替换位（当前用 WebSocket 穿 E2B HTTP 代理）。
