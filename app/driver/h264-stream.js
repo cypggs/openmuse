@@ -92,30 +92,51 @@ function broadcastH264(nal) {
 let rfbSock = null, rfbReady = false;
 function ensureRfb() {
   if (rfbReady) return Promise.resolve();
-  return new Promise((resolve, reject) => {
+  if (ensureRfb._pending) return ensureRfb._pending;
+  ensureRfb._pending = new Promise((resolve, reject) => {
     const s = net.createConnection({ host: RFB_HOST, port: RFB_PORT }, () => {
       let stage = 0, buf = Buffer.alloc(0);
+      const timer = setTimeout(() => { s.destroy(); reject(new Error('rfb timeout')); }, 8000);
       s.on('data', (d) => {
         buf = Buffer.concat([buf, d]);
-        if (stage === 0 && buf.length >= 12) { s.write(buf.slice(0, 12)); buf = buf.slice(12); stage = 1; }
-        else if (stage === 1 && buf.length >= 4) {
-          if (buf.readUInt32BE(0) !== 1) { s.destroy(); return reject(new Error('auth')); }
-          buf = buf.slice(4); stage = 2; s.write(Buffer.from([1]));
-        } else if (stage === 2 && buf.length >= 24) {
-          rfbSock = s; rfbReady = true; s.removeAllListeners('data'); resolve();
-        }
+        try {
+          if (stage === 0 && buf.length >= 12) {
+            // Server version → 回写相同版本
+            s.write(buf.slice(0, 12)); buf = buf.slice(12); stage = 1;
+          }
+          if (stage === 1 && buf.length >= 4) {
+            const scheme = buf.readUInt32BE(0); buf = buf.slice(4);
+            if (scheme !== 1) { clearTimeout(timer); s.destroy(); return reject(new Error('rfb auth scheme=' + scheme)); }
+            stage = 2; // 等 SecurityResult (None auth 下 4 字节)
+          }
+          if (stage === 2 && buf.length >= 4) {
+            const secResult = buf.readUInt32BE(0); buf = buf.slice(4);
+            if (secResult !== 0) { clearTimeout(timer); s.destroy(); return reject(new Error('rfb security result=' + secResult)); }
+            s.write(Buffer.from([1])); // ClientInit: shared
+            stage = 3;
+          }
+          if (stage === 3 && buf.length >= 24) {
+            // ServerInit 前 24 字节已到（后面还有 name，忽略）
+            clearTimeout(timer);
+            rfbSock = s; rfbReady = true;
+            s.removeAllListeners('data');
+            s.on('error', () => { rfbReady = false; rfbSock = null; ensureRfb._pending = null; });
+            log('rfb ready');
+            resolve();
+          }
+        } catch (e) { clearTimeout(timer); reject(e); }
       });
-      s.on('error', reject);
-      setTimeout(() => reject(new Error('rfb timeout')), 5000);
+      s.on('error', (e) => { clearTimeout(timer); reject(e); });
     });
-  });
+  }).finally(() => { if (rfbReady) ensureRfb._pending = null; });
+  return ensureRfb._pending;
 }
 
 async function handleInput(json) {
   try {
     const m = JSON.parse(json);
-    await ensureRfb().catch(() => {});
-    if (!rfbReady) return;
+    await ensureRfb().catch((e) => log('rfb connect fail:', e.message));
+    if (!rfbReady) { log('rfb not ready, drop input'); return; }
     if (m.type === 'pointer') {
       const b = Buffer.alloc(6);
       b[0] = 5; b[1] = m.buttonMask | 0;
@@ -126,7 +147,7 @@ async function handleInput(json) {
       b[0] = 4; b[1] = m.down ? 1 : 0; b.writeUInt32BE(m.keysym >>> 0, 4);
       rfbSock.write(b);
     }
-  } catch (_) {}
+  } catch (e) { log('handleInput err:', e.message); }
 }
 
 // ---- GStreamer ----

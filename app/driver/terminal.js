@@ -90,21 +90,22 @@ function handleWsFrame(client, data) {
     if (opcode === 0x8) { client.sock.destroy(); return; }
     if (opcode === 0x2 || opcode === 0x1) {
       // 二进制或文本：直接写入 PTY
-      // 处理终端 resize 消息（JSON {"type":"resize","cols":80,"rows":24}）
       if (opcode === 0x1) {
         try {
           const msg = JSON.parse(payload.toString());
-          if (msg.type === 'resize' && client.pty) {
-            // 用 stty 设置 PTY 大小（通过 kill -WINCH 或直接写）
-            // script 的 PTY 大小通过 ioctl 设置，这里用 python 辅助
-            const { exec } = require('child_process');
-            // 简化：暂不支持 resize，后续可加
+          if (msg.type === 'resize') {
             continue;
           }
         } catch (_) { /* 不是 JSON，当普通输入 */ }
       }
       if (client.pty && !client.pty.killed) {
-        try { client.pty.stdin.write(payload); } catch (_) {}
+        try {
+          client.pty.stdin.write(payload);
+          // 调试：记录收到的输入（仅前 20 字符）
+          // log('pty input:', JSON.stringify(payload.toString().slice(0, 20)));
+        } catch (e) { log('pty write fail:', e.message); }
+      } else {
+        log('pty not ready, dropping input');
       }
     }
   }
