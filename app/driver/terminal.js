@@ -35,8 +35,9 @@ function handleWsHandshake(req, sock) {
   log('ws client connected, total:', clients.size);
 
   // 为每个客户端 spawn 一个 PTY shell
-  // script -qec 提供 PTY，-q 安静模式
-  const pty = spawn('script', ['-qec', 'bash --login', '/dev/null'], {
+  // script -qec 提供 PTY，-q 安静模式；
+  // 先 stty 把 PTY 设为 160x48（前端 fit 后通常接近这个尺寸），避免 top/vim 等全屏程序按 80x24 渲染
+  const pty = spawn('script', ['-qec', 'stty cols 160 rows 48 2>/dev/null; exec bash --login', '/dev/null'], {
     stdio: ['pipe', 'pipe', 'pipe'],
     env: { ...process.env, TERM: 'xterm-256color', PS1: '\\u@\\h:\\w\\$ ' },
   });

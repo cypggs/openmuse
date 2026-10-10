@@ -98,10 +98,13 @@
     termModal.classList.add('open');
     if (!termInited && window.__openmuseTerminal) {
       var body = document.getElementById('termBody');
-      // 设置终端容器高度
-      body.style.height = '500px';
+      // 高度由 .lv-body 的 flex:1 撑满面板，不再硬编码
+      body.style.height = '';
       window.__openmuseTerminal.init(body);
       termInited = true;
+    } else if (window.__openmuseTerminal) {
+      // 弹窗重新打开时容器尺寸可能变化，重算一次
+      window.__openmuseTerminal.refit();
     }
   }
 
