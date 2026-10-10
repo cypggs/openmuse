@@ -1,11 +1,11 @@
 // openmuse 联网工具：web_search / web_read。
 //
-// - web_search：环境变量 BRAVE_API_KEY 存在时走 Brave Search API，
-//   否则抓取 DuckDuckGo HTML 结果页并用正则解析。
+// - web_search：优先级 TAVILY_API_KEY（Tavily，AI 专用搜索，带答案抽取）
+//   → BRAVE_API_KEY（Brave Search API）→ 都没有时抓取 DuckDuckGo HTML 结果页并用正则解析。
 // - web_read：抓取公网 http(s) 页面并提取正文，带 SSRF 防护。
 //
 // 安全约定：
-// - 密钥只从 process.env 读取（BRAVE_API_KEY），绝不打日志、不写文件。
+// - 密钥只从 process.env 读取（TAVILY_API_KEY / BRAVE_API_KEY），绝不打日志、不写文件。
 // - web_read 拒绝访问内网 / 回环 / 本地地址（见 isPrivateHost），
 //   且跟随重定向后的最终地址会再检查一次。
 // - 所有公开函数失败时返回 { error: '中文信息' }，绝不抛错。
@@ -14,6 +14,7 @@
 
 const DDG_SEARCH_URL = 'https://html.duckduckgo.com/html/?q=';
 const BRAVE_SEARCH_URL = 'https://api.search.brave.com/res/v1/web/search';
+const TAVILY_SEARCH_URL = 'https://api.tavily.com/search';
 const UA = 'Mozilla/5.0 (compatible; openmuse/1.0)';
 
 // DNS 解析器：默认用 dns.promises.lookup；测试可通过 setDnsLookup 注入桩，
@@ -175,12 +176,59 @@ async function braveSearch(query, count) {
   };
 }
 
-// 联网搜索。成功返回 { results: [{title, url, snippet}] }，失败返回 { error }。
+// Tavily 搜索（AI 专用）：POST JSON，返回 results + answer（模型生成的直接答案）。
+// 成功返回 { results: [{title, url, snippet}], answer? }，失败返回 { error }。
+async function tavilySearch(query, count) {
+  let res;
+  try {
+    res = await fetchWithTimeout(
+      TAVILY_SEARCH_URL,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          api_key: process.env.TAVILY_API_KEY,
+          query,
+          search_depth: 'advanced',
+          max_results: count,
+          include_answer: true,
+          include_raw_content: false,
+        }),
+      },
+      timeoutMs()
+    );
+  } catch (e) {
+    return { error: '搜索' + netError(e) };
+  }
+  if (!res.ok) return { error: '搜索服务返回 HTTP ' + res.status + '（请检查 TAVILY_API_KEY）' };
+  let j;
+  try {
+    j = await res.json();
+  } catch (e) {
+    return { error: '解析搜索结果失败' };
+  }
+  const arr = j && Array.isArray(j.results) ? j.results : [];
+  const out = {
+    results: arr.slice(0, count).map((r) => ({
+      title: cleanText(r.title || ''),
+      url: String(r.url || ''),
+      snippet: cleanText(r.content || ''),
+    })),
+  };
+  if (j && typeof j.answer === 'string' && j.answer.trim()) {
+    out.answer = cleanText(j.answer);
+  }
+  return out;
+}
+
+// 联网搜索。成功返回 { results: [{title, url, snippet}], answer? }，失败返回 { error }。
 async function web_search(query, count) {
   try {
     query = String(query == null ? '' : query).trim();
     if (!query) return { error: '搜索关键词为空' };
     count = Math.min(Math.max(parseInt(count, 10) || 8, 1), 20);
+    // 优先级：Tavily（AI 专用，带答案抽取）→ Brave → DuckDuckGo（免费兜底）
+    if (process.env.TAVILY_API_KEY) return await tavilySearch(query, count);
     if (process.env.BRAVE_API_KEY) return await braveSearch(query, count);
     return await ddgSearch(query, count);
   } catch (e) {
@@ -381,18 +429,21 @@ async function web_read(url, max_chars) {
 }
 
 // 把 web_search 的 results 数组格式化成喂给模型的纯文本。
-function formatSearchResults(results) {
+function formatSearchResults(results, answer) {
   if (!Array.isArray(results) || results.length === 0) return '（无搜索结果）';
-  return results
-    .map((r, i) => {
-      const title = (r && r.title) || '（无标题）';
-      const url = (r && r.url) || '';
-      const snippet = (r && r.snippet) || '';
-      let line = i + 1 + '. ' + title + '\n   ' + url;
-      if (snippet) line += '\n   ' + snippet;
-      return line;
-    })
-    .join('\n\n');
+  const lines = results.map((r, i) => {
+    const title = (r && r.title) || '（无标题）';
+    const url = (r && r.url) || '';
+    const snippet = (r && r.snippet) || '';
+    let line = i + 1 + '. ' + title + '\n   ' + url;
+    if (snippet) line += '\n   ' + snippet;
+    return line;
+  });
+  // Tavily 会返回模型生成的直接答案，放在最前面供 agent 参考（标注来源）。
+  if (typeof answer === 'string' && answer.trim()) {
+    lines.unshift('【搜索直接答案】' + answer.trim());
+  }
+  return lines.join('\n\n');
 }
 
 module.exports = { web_search, web_read, isPrivateHost, isPrivateIPString, formatSearchResults, setDnsLookup };

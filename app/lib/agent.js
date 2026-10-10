@@ -311,7 +311,7 @@ async function executeToolInner(name, args, userId, sessionId) {
       if (name === 'web_search') {
         const r = await web.web_search(args.query, args.count);
         if (r.error) return { ok: false, output: r.error };
-        return { ok: true, output: truncate(web.formatSearchResults(r.results), TOOL_OUTPUT_LIMIT) };
+        return { ok: true, output: truncate(web.formatSearchResults(r.results, r.answer), TOOL_OUTPUT_LIMIT) };
       }
       const r = await web.web_read(args.url, args.max_chars);
       if (r.error) return { ok: false, output: r.error };

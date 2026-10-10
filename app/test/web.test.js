@@ -197,6 +197,59 @@ async function t(name, fn) {
     }
   });
 
+  // ---- web_search：Tavily 路径（优先级高于 Brave） ----
+  await t('TAVILY_API_KEY 存在时走 Tavily（优先于 Brave）', async () => {
+    process.env.TAVILY_API_KEY = 'tvly-test-key';
+    process.env.BRAVE_API_KEY = 'brave-should-be-ignored';
+    let gotUrl = '';
+    let gotBody = null;
+    stubFetch(async (u, opts) => {
+      gotUrl = u;
+      gotBody = JSON.parse(opts.body);
+      return mkRes({
+        contentType: 'application/json',
+        jsonBody: {
+          answer: 'Tavily 直接答案',
+          results: [
+            { title: 'T <b>1</b>', url: 'https://tavily.example/a', content: 'content  one' },
+            { title: 'T2', url: 'https://tavily.example/b' },
+          ],
+        },
+        url: u,
+      });
+    });
+    try {
+      const r = await web.web_search('tavily q', 5);
+      assert.strictEqual(gotUrl, 'https://api.tavily.com/search', gotUrl);
+      assert.strictEqual(gotBody.api_key, 'tvly-test-key');
+      assert.strictEqual(gotBody.query, 'tavily q');
+      assert.strictEqual(gotBody.max_results, 5);
+      assert.strictEqual(gotBody.include_answer, true);
+      assert.ok(!r.error, r.error);
+      assert.strictEqual(r.results.length, 2);
+      assert.strictEqual(r.results[0].title, 'T 1');
+      assert.strictEqual(r.results[0].snippet, 'content one');
+      assert.strictEqual(r.answer, 'Tavily 直接答案');
+      // answer 应出现在格式化输出最前面
+      const fmt = web.formatSearchResults(r.results, r.answer);
+      assert.ok(fmt.startsWith('【搜索直接答案】Tavily 直接答案'), fmt.slice(0, 40));
+    } finally {
+      delete process.env.TAVILY_API_KEY;
+      delete process.env.BRAVE_API_KEY;
+    }
+  });
+
+  await t('Tavily API 非 200 返回 {error}', async () => {
+    process.env.TAVILY_API_KEY = 'tvly-test-key';
+    stubFetch(async (u) => mkRes({ ok: false, status: 401, contentType: 'application/json', url: u }));
+    try {
+      const r = await web.web_search('x');
+      assert.ok(r.error && r.error.includes('401') && r.error.includes('TAVILY'), r.error);
+    } finally {
+      delete process.env.TAVILY_API_KEY;
+    }
+  });
+
   // ---- isPrivateHost ----
   await t('isPrivateHost：内网/回环/本地拦截，公网放行', async () => {
     const yes = [
