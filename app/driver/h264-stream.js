@@ -129,7 +129,14 @@ function ensureRfb() {
             clearTimeout(timer);
             rfbSock = s; rfbReady = true;
             s.removeAllListeners('data');
-            s.on('error', () => { rfbReady = false; rfbSock = null; ensureRfb._pending = null; });
+            const onDead = () => {
+              if (rfbSock === s) {
+                log('rfb socket dead, will reconnect on next input');
+                rfbReady = false; rfbSock = null; ensureRfb._pending = null;
+              }
+            };
+            s.on('error', onDead);
+            s.on('close', onDead);
             log('rfb ready');
             resolve();
           }
@@ -145,16 +152,26 @@ async function handleInput(json) {
   try {
     const m = JSON.parse(json);
     await ensureRfb().catch((e) => log('rfb connect fail:', e.message));
-    if (!rfbReady) { log('rfb not ready, drop input'); return; }
+    if (!rfbReady || !rfbSock) { log('rfb not ready, drop input'); return; }
+    const sendRfb = (b) => {
+      try {
+        // 若 socket 已死，write 返回 false 或抛错；标记重连，下次输入重建
+        const ok = rfbSock.write(b);
+        if (!ok) log('rfb write buffered');
+      } catch (e) {
+        log('rfb write fail:', e.message);
+        rfbReady = false; rfbSock = null; ensureRfb._pending = null;
+      }
+    };
     if (m.type === 'pointer') {
       const b = Buffer.alloc(6);
       b[0] = 5; b[1] = m.buttonMask | 0;
       b.writeUInt16BE(m.x | 0, 2); b.writeUInt16BE(m.y | 0, 4);
-      rfbSock.write(b);
+      sendRfb(b);
     } else if (m.type === 'key') {
       const b = Buffer.alloc(8);
       b[0] = 4; b[1] = m.down ? 1 : 0; b.writeUInt32BE(m.keysym >>> 0, 4);
-      rfbSock.write(b);
+      sendRfb(b);
     }
   } catch (e) { log('handleInput err:', e.message); }
 }
