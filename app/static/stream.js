@@ -129,7 +129,23 @@
     return map[e.key] || 0;
   }
   function sendInput(obj) {
-    if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify(obj));
+      // 临时调试：可视化输入计数（排查输入链路用，稳定后删除）
+      try {
+        var dbg = document.getElementById('lv-input-dbg');
+        if (!dbg && modal) {
+          dbg = document.createElement('div');
+          dbg.id = 'lv-input-dbg';
+          dbg.style.cssText = 'position:absolute;top:8px;left:8px;z-index:999;background:rgba(0,0,0,.7);color:#0f0;font:11px monospace;padding:4px 8px;border-radius:4px;pointer-events:none;';
+          modal.querySelector('.lv-panel').appendChild(dbg);
+        }
+        if (dbg) {
+          sendInput._n = (sendInput._n || 0) + 1;
+          dbg.textContent = 'input#' + sendInput._n + ' ' + obj.type + ' ws=' + ws.readyState;
+        }
+      } catch (_) {}
+    }
   }
   function videoPos(e) {
     var r = video.getBoundingClientRect();
