@@ -101,13 +101,22 @@ function ensureRfb() {
         buf = Buffer.concat([buf, d]);
         try {
           if (stage === 0 && buf.length >= 12) {
-            // Server version → 回写相同版本
+            // Server version → 回写相同版本（x11vnc 发 RFB 003.008）
             s.write(buf.slice(0, 12)); buf = buf.slice(12); stage = 1;
           }
-          if (stage === 1 && buf.length >= 4) {
-            const scheme = buf.readUInt32BE(0); buf = buf.slice(4);
-            if (scheme !== 1) { clearTimeout(timer); s.destroy(); return reject(new Error('rfb auth scheme=' + scheme)); }
-            stage = 2; // 等 SecurityResult (None auth 下 4 字节)
+          if (stage === 1 && buf.length >= 2) {
+            // RFB 3.8 安全协商：1 字节类型数量 + N 字节类型列表
+            // x11vnc -nopw 发 01 01（1 种类型：None=1）
+            const nTypes = buf[0];
+            if (buf.length < 1 + nTypes) return; // 等收齐
+            const types = Array.from(buf.slice(1, 1 + nTypes));
+            buf = buf.slice(1 + nTypes);
+            if (!types.includes(1)) {
+              clearTimeout(timer); s.destroy();
+              return reject(new Error('rfb no None auth, types=' + types.join(',')));
+            }
+            s.write(Buffer.from([1])); // 选择 None
+            stage = 2; // 等 SecurityResult（4 字节）
           }
           if (stage === 2 && buf.length >= 4) {
             const secResult = buf.readUInt32BE(0); buf = buf.slice(4);
@@ -128,7 +137,7 @@ function ensureRfb() {
       });
       s.on('error', (e) => { clearTimeout(timer); reject(e); });
     });
-  }).finally(() => { if (rfbReady) ensureRfb._pending = null; });
+  }).finally(() => { ensureRfb._pending = null; });
   return ensureRfb._pending;
 }
 

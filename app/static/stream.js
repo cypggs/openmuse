@@ -133,8 +133,13 @@
   }
   function videoPos(e) {
     var r = video.getBoundingClientRect();
-    var x = Math.round((e.clientX - r.left) / r.width * 1280);
-    var y = Math.round((e.clientY - r.top) / r.height * 800);
+    // 远端桌面固定 1280x800；video 用 object-fit:contain，画面可能有黑边，
+    // 需按实际画面区域映射，而非整个 video 元素
+    var scale = Math.min(r.width / 1280, r.height / 800);
+    var vw = 1280 * scale, vh = 800 * scale;
+    var ox = r.left + (r.width - vw) / 2, oy = r.top + (r.height - vh) / 2;
+    var x = Math.round((e.clientX - ox) / vw * 1280);
+    var y = Math.round((e.clientY - oy) / vh * 800);
     return { x: Math.max(0, Math.min(1279, x)), y: Math.max(0, Math.min(799, y)) };
   }
   function bindInput(v) {
@@ -151,7 +156,7 @@
       sendInput({ type: 'pointer', x: p.x, y: p.y, buttonMask: 0 });
     });
     v.addEventListener('mousemove', function (e) {
-      if (!buttons) return;
+      // hover 也要发移动事件（之前只在按住时发，导致光标不动）
       var p = videoPos(e);
       sendInput({ type: 'pointer', x: p.x, y: p.y, buttonMask: buttons });
     });
