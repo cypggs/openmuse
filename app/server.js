@@ -515,6 +515,22 @@ app.post('/api/chat', requireDb, requireUser, async (req, res) => {
       clientGone = true;
     });
 
+    // SSE 心跳：agent 执行工具/等模型时可能长时间无事件，每 15s 发一个注释帧，
+    // 防止 InstaCloud 边缘或中间代理把"空闲"长连接掐掉（表现为前端 network error）。
+    // 注意：前端解析时以 data: 开头的行为准，注释帧会被忽略。
+    const hbTimer = setInterval(() => {
+      if (!clientGone) {
+        try {
+          res.write(':ping\n\n');
+        } catch (_) {}
+      }
+    }, 15000);
+    const stopHb = () => {
+      try {
+        clearInterval(hbTimer);
+      } catch (_) {}
+    };
+
     // v1.1: 长期记忆注入 system prompt（无记忆时不注入该块）
     let systemExtra = '';
     try {
@@ -559,6 +575,7 @@ app.post('/api/chat', requireDb, requireUser, async (req, res) => {
       }
     }
     if (!clientGone) res.write('data: [DONE]\n\n');
+    stopHb();
     res.end();
 
     // 旁聊自动标题（fire-and-forget，不阻塞 SSE；异常只打日志）
@@ -597,6 +614,9 @@ app.post('/api/chat', requireDb, requireUser, async (req, res) => {
     }
   } catch (e) {
     console.error('[openmuse] /api/chat failed:', e.message);
+    try {
+      if (typeof stopHb === 'function') stopHb();
+    } catch (_) {}
     if (!res.headersSent) {
       return res.status(500).json({ error: 'internal_error', message: e.message });
     }

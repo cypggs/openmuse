@@ -359,6 +359,7 @@ function addErrorMsg(text){
   var d=document.createElement('div');d.className='msg err';
   var b=document.createElement('div');b.className='bub';b.textContent='⚠ '+text;
   d.appendChild(b);innerEl.appendChild(d);autoscroll();
+  return d;
 }
 function addTyping(){
   var body=addAiMsg();
@@ -561,7 +562,26 @@ async function doSend(){
     else if(!finished){body.closest('.msg').remove();addErrorMsg('连接中断，未收到回复');}
   }catch(e){
     try{body.closest('.msg').remove();}catch(_){}
-    addErrorMsg('网络错误：'+e.message);
+    // 连接中断时服务端往往已在后台继续执行并保存了回复，尝试重载本会话；
+    // 若重载后最后一条是 AI 回复则直接展示，否则才报网络错误。
+    var errBox=addErrorMsg('网络连接中断，正在尝试恢复…');
+    setTimeout(async function(){
+      try{
+        var r=await fetch('/api/sessions/'+encodeURIComponent(currentSessionId)+'/messages');
+        var list=await r.json();
+        if(list&&list.length){
+          var last=list[list.length-1];
+          if(last.role!=='user'&&last.content){
+            try{errBox.closest('.msg').remove();}catch(_){}
+            await openSession(currentSessionId,topTitle.textContent);
+            return;
+          }
+        }
+        errBox.querySelector('.bub').textContent='⚠ 网络错误：'+e.message+'（可点输入框重新发送）';
+      }catch(_){
+        try{errBox.querySelector('.bub').textContent='⚠ 网络错误：'+e.message;}catch(_){}
+      }
+    },2500);
   }
   setBusy(false);autoscroll();
   refreshSessions(); /* 捡起服务端自动起的旁聊标题 */
