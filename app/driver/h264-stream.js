@@ -151,9 +151,6 @@ function ensureRfb() {
 async function handleInput(json) {
   try {
     const m = JSON.parse(json);
-    // 临时调试：记录每个输入（排查用，稳定后删除或降级）
-    handleInput._n = (handleInput._n || 0) + 1;
-    if (handleInput._n <= 40) log('input#' + handleInput._n, m.type, m.type === 'pointer' ? ('btn=' + m.buttonMask) : ('ks=' + m.keysym + ' down=' + m.down));
     await ensureRfb().catch((e) => log('rfb connect fail:', e.message));
     if (!rfbReady || !rfbSock) { log('rfb not ready, drop input'); return; }
     const sendRfb = (b) => {
@@ -189,7 +186,7 @@ function startGst() {
     '!', 'videorate', '!', 'video/x-raw,framerate=15/1',
     '!', 'queue', 'leaky=downstream', 'max-size-buffers=2',
     '!', 'x264enc', 'tune=zerolatency', 'speed-preset=ultrafast',
-    'bframes=0', 'key-int-max=30', 'byte-stream=true',
+    'bframes=0', 'key-int-max=30', 'repeat-headers=true', 'byte-stream=true',
     '!', 'fdsink', 'fd=1',
   ];
   log('starting gst-launch-1.0');
