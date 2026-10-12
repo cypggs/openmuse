@@ -1,13 +1,15 @@
 /**
- * openmuse H264 桌面推流服务（对标 Memoh 的 GStreamer pipeline）
+ * openmuse H264 桌面推流服务
  *
- * 链路：ximagesrc(:99 X11直采) → gst-launch-1.0 (x264enc → fdsink)
+ * 视频：ximagesrc(:99 X11直采) → gst-launch-1.0 (x264enc → fdsink)
  *       → Node 读 H264 NAL → WebSocket (8889) → 浏览器 JMuxer(MSE) → <video>
- * 输入：浏览器 → WebSocket → Node RFB客户端 → x11vnc(:5900) → XTEST → X11
- * (视频不走 x11vnc：其 XDamage 跟踪会间歇性坏掉导致黑屏)
- * 输入：WebSocket JSON → RFB PointerEvent/KeyEvent → x11vnc
- *
- * GStreamer pipeline 与 Memoh 的 H264 分支一致（除了末端用 fdsink 不用 udpsink）：
+ * 输入：
+ *   - 鼠标：浏览器 → WebSocket → Node → xdotool → X11 XTEST
+ *   - 键盘：浏览器 → WebSocket → Node → CDP (Chrome DevTools Protocol)
+ *           → Chrome (Input.insertText / Input.dispatchKeyEvent)
+ * （x11vnc 的 RFB 输入已废弃：其 XTEST 翻译对点击/特殊键失效；
+ *   xdotool 的 XTEST 字符输入被 Chrome 屏蔽，故键盘走 CDP）
+ */
  *   rfbsrc host=127.0.0.1 port=5900 shared=true incremental=false use-copyrect=true do-timestamp=true
  *   ! videoconvert ! videorate ! video/x-raw,framerate=15/1
  *   ! queue leaky=downstream max-size-buffers=2
@@ -155,6 +157,120 @@ const KEYSYM_TO_XDOTOOL = {
   0x20: 'space',
 };
 
+// ---- CDP 键盘输入 ----
+// Chrome 屏蔽 XTEST 合成的字符输入，故键盘走 CDP。
+// 极简 WS 客户端（Node 无内置 ws 库，手写握手+帧）。
+let cdpSock = null, cdpId = 0;
+const cdpPending = new Map();
+function cdpSend(method, params = {}) {
+  return new Promise((resolve, reject) => {
+    if (!cdpSock || cdpSock.destroyed) return reject(new Error('cdp not connected'));
+    const id = ++cdpId;
+    cdpPending.set(id, { resolve, reject });
+    const payload = Buffer.from(JSON.stringify({ id, method, params }));
+    // WS client frame: FIN+text, masked
+    const mask = require('crypto').randomBytes(4);
+    const header = Buffer.alloc(6);
+    header[0] = 0x81;
+    header[1] = 0x80 | payload.length;
+    mask.copy(header, 2);
+    const masked = Buffer.from(payload.map((b, i) => b ^ mask[i % 4]));
+    cdpSock.write(Buffer.concat([header, masked]));
+    setTimeout(() => {
+      if (cdpPending.has(id)) { cdpPending.delete(id); reject(new Error('cdp timeout')); }
+    }, 5000);
+  });
+}
+function ensureCdp() {
+  if (cdpSock && !cdpSock.destroyed) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const http = require('http');
+    http.get('http://127.0.0.1:9222/json/list', (res) => {
+      let body = '';
+      res.on('data', d => body += d);
+      res.on('end', () => {
+        try {
+          const tabs = JSON.parse(body);
+          if (!tabs.length) return reject(new Error('no tabs'));
+          const wsUrl = tabs[0].webSocketDebuggerUrl;
+          const m = wsUrl.match(/ws:\/\/127\.0\.0\.1:9222(\/devtools\/page\/.+)/);
+          if (!m) return reject(new Error('bad ws url'));
+          const path = m[1];
+          const net = require('net');
+          const crypto = require('crypto');
+          const key = crypto.randomBytes(16).toString('base64');
+          const sock = net.createConnection({ host: '127.0.0.1', port: 9222 }, () => {
+            sock.write(
+              `GET ${path} HTTP/1.1\r\n` +
+              `Host: 127.0.0.1:9222\r\n` +
+              `Upgrade: websocket\r\n` +
+              `Connection: Upgrade\r\n` +
+              `Sec-WebSocket-Key: ${key}\r\n` +
+              `Sec-WebSocket-Version: 13\r\n\r\n`
+            );
+          });
+          let hs = '', hsDone = false, buf = Buffer.alloc(0);
+          sock.on('data', (d) => {
+            if (!hsDone) {
+              hs += d.toString();
+              if (hs.includes('\r\n\r\n')) { hsDone = true; cdpSock = sock; resolve(); }
+              return;
+            }
+            buf = Buffer.concat([buf, d]);
+            // 解析 WS server frame（不 masked）
+            while (buf.length >= 2) {
+              const b0 = buf[0], b1 = buf[1];
+              const opcode = b0 & 0x0f;
+              let len = b1 & 0x7f, off = 2;
+              if (len === 126) { len = buf.readUInt16BE(2); off = 4; }
+              else if (len === 127) { len = Number(buf.readBigUInt64BE(2)); off = 10; }
+              if (buf.length < off + len) break;
+              const payload = buf.slice(off, off + len);
+              buf = buf.slice(off + len);
+              if (opcode === 0x1) {
+                try {
+                  const msg = JSON.parse(payload.toString());
+                  if (msg.id && cdpPending.has(msg.id)) {
+                    const { resolve, reject } = cdpPending.get(msg.id);
+                    cdpPending.delete(msg.id);
+                    if (msg.error) reject(new Error(msg.error.message));
+                    else resolve(msg.result);
+                  }
+                } catch (_) {}
+              }
+            }
+          });
+          sock.on('error', (e) => { cdpSock = null; reject(e); });
+          sock.on('close', () => { cdpSock = null; });
+          setTimeout(() => reject(new Error('cdp connect timeout')), 8000);
+        } catch (e) { reject(e); }
+      });
+    }).on('error', reject);
+  });
+}
+// keysym → CDP key 名
+const KEYSYM_TO_CDP = {
+  0xff08: 'Backspace', 0xff09: 'Tab', 0xff0d: 'Enter', 0xff1b: 'Escape',
+  0xffff: 'Delete', 0xff50: 'Home', 0xff57: 'End',
+  0xff51: 'ArrowLeft', 0xff52: 'ArrowUp', 0xff53: 'ArrowRight', 0xff54: 'ArrowDown',
+};
+async function cdpKey(keysym, down) {
+  try {
+    await ensureCdp();
+    const ks = keysym >>> 0;
+    const cdpKeyName = KEYSYM_TO_CDP[ks];
+    if (cdpKeyName) {
+      // 特殊键：dispatchKeyEvent
+      const type = down ? 'keyDown' : 'keyUp';
+      await cdpSend('Input.dispatchKeyEvent', { type, key: cdpKeyName });
+    } else if (ks < 128 && down) {
+      // 可打印字符：insertText（只在按下时）
+      const ch = String.fromCharCode(ks);
+      await cdpSend('Input.insertText', { text: ch });
+    }
+  } catch (e) { log('cdpKey fail:', e.message); }
+}
+
 async function handleInput(json) {
   try {
     const m = JSON.parse(json);
@@ -174,21 +290,9 @@ async function handleInput(json) {
         }
       }
     } else if (m.type === 'key') {
-      if (!m.down) return; // 只处理按下，xdotool key 自带 down+up
-      const ks = m.keysym >>> 0;
-      const xkey = KEYSYM_TO_XDOTOOL[ks];
-      if (xkey) {
-        xdotool(`key ${xkey}`);
-      } else if (ks < 128) {
-        // 可打印 ASCII：用 key 直接按字符（比 type 更可靠）
-        const ch = String.fromCharCode(ks);
-        // 转义特殊字符
-        if (/[a-zA-Z0-9]/.test(ch)) {
-          xdotool(`key ${ch}`);
-        } else {
-          xdotool(`type --delay 0 '${ch.replace(/'/g, "'\\''")}'`);
-        }
-      }
+      // 键盘走 CDP（Chrome 屏蔽 XTEST 字符输入）
+      // cdpKey 内部处理 down/up，insertText 只在 down 时
+      cdpKey(m.keysym, m.down);
     }
   } catch (e) { log('handleInput err:', e.message); }
 }
