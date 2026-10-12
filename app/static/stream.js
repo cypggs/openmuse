@@ -152,6 +152,28 @@
       buttons = e.button === 0 ? 1 : e.button === 2 ? 4 : 2;
       sendInput({ type: 'pointer', x: p.x, y: p.y, buttonMask: buttons });
     });
+    // 键盘：在 document 级监听，桌面面板打开时生效。
+    // 原因：video 的 focus 容易丢（如点击后焦点被其他元素抢走），
+    // 导致 keydown 收不到。document 级更可靠，但需排除用户在输入框打字的情况。
+    if (!bindInput._docKeyBound) {
+      bindInput._docKeyBound = true;
+      document.addEventListener('keydown', function (e) {
+        // 只在桌面面板打开时转发
+        if (!modal || !modal.classList.contains('open')) return;
+        // 用户在输入框/文本域打字时不转发（避免干扰聊天输入）
+        var t = e.target;
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+        var ks = keysymForEvent(e);
+        if (ks) { sendInput({ type: 'key', keysym: ks, down: true }); e.preventDefault(); }
+      });
+      document.addEventListener('keyup', function (e) {
+        if (!modal || !modal.classList.contains('open')) return;
+        var t = e.target;
+        if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+        var ks = keysymForEvent(e);
+        if (ks) { sendInput({ type: 'key', keysym: ks, down: false }); e.preventDefault(); }
+      });
+    }
     v.addEventListener('mouseup', function (e) {
       var p = videoPos(e);
       buttons = 0;
@@ -163,14 +185,6 @@
       sendInput({ type: 'pointer', x: p.x, y: p.y, buttonMask: buttons });
     });
     v.tabIndex = 0;
-    v.addEventListener('keydown', function (e) {
-      var ks = keysymForEvent(e);
-      if (ks) { sendInput({ type: 'key', keysym: ks, down: true }); e.preventDefault(); }
-    });
-    v.addEventListener('keyup', function (e) {
-      var ks = keysymForEvent(e);
-      if (ks) { sendInput({ type: 'key', keysym: ks, down: false }); e.preventDefault(); }
-    });
   }
 
   window.__openmuseLiveView = open;
