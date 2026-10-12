@@ -97,15 +97,11 @@ function broadcastH264(nal) {
   }
 }
 
-// ---- RFB 输入 ----
-// 混合输入策略：
-// - 鼠标移动、普通字符：走 RFB→x11vnc（低延迟，已验证可用）
-// - 鼠标点击、特殊键（Enter/Backspace等）：走 xdotool 直驱 XTEST
-//   （x11vnc 的 RFB→XTEST 对 button press 和 0xFFxx keysym 翻译失效，
-//    已用 xdotool 实测 Enter 可触发导航，证明 X11 XTEST 本身正常）
-let rfbSock = null, rfbReady = false;
-
-// xdotool 持久化 bash，避免每次 spawn 进程开销
+// ---- 输入 ----
+// 全走 xdotool 直驱 X11 XTEST，不再用 RFB→x11vnc。
+// 原因：x11vnc 能收到 RFB 事件但翻译到 X11 时静默失效
+// （moves/clicks/特殊键均无反应），而 xdotool 直驱已验证有效。
+// 用持久化 bash 进程避免每次 spawn 开销。
 let xdotoolProc = null;
 function ensureXdotool() {
   if (xdotoolProc && !xdotoolProc.killed) return xdotoolProc;
@@ -124,13 +120,52 @@ function xdotool(cmd) {
     if (p && p.stdin.writable) p.stdin.write('xdotool ' + cmd + '\n');
   } catch (e) { log('xdotool fail:', e.message); }
 }
-// keysym → xdotool key 名（只列特殊键，普通字符走 RFB）
+// keysym → xdotool key 名
 const KEYSYM_TO_XDOTOOL = {
   0xff08: 'BackSpace', 0xff09: 'Tab', 0xff0d: 'Return', 0xff1b: 'Escape',
   0xffff: 'Delete', 0xff50: 'Home', 0xff57: 'End',
   0xff51: 'Left', 0xff52: 'Up', 0xff53: 'Right', 0xff54: 'Down',
   0xffe1: 'Shift_L', 0xffe3: 'Control_L', 0xffe9: 'Alt_L', 0xffe7: 'Super_L',
+  0x20: 'space',
 };
+
+async function handleInput(json) {
+  try {
+    const m = JSON.parse(json);
+    if (m.type === 'pointer') {
+      const mask = m.buttonMask | 0;
+      const x = m.x | 0, y = m.y | 0;
+      if (mask !== 0) {
+        // 点击：移动+点击
+        const btn = mask === 4 ? 3 : mask === 2 ? 2 : 1;
+        xdotool(`mousemove ${x} ${y} click ${btn}`);
+      } else {
+        // 纯移动：节流，避免 xdotool 过载（每 30ms 最多一次）
+        const now = Date.now();
+        if (!handleInput._lastMove || now - handleInput._lastMove > 30) {
+          handleInput._lastMove = now;
+          xdotool(`mousemove ${x} ${y}`);
+        }
+      }
+    } else if (m.type === 'key') {
+      if (!m.down) return; // 只处理按下，xdotool key 自带 down+up
+      const ks = m.keysym >>> 0;
+      const xkey = KEYSYM_TO_XDOTOOL[ks];
+      if (xkey) {
+        xdotool(`key ${xkey}`);
+      } else if (ks < 128) {
+        // 可打印 ASCII：用 key 直接按字符（比 type 更可靠）
+        const ch = String.fromCharCode(ks);
+        // 转义特殊字符
+        if (/[a-zA-Z0-9]/.test(ch)) {
+          xdotool(`key ${ch}`);
+        } else {
+          xdotool(`type --delay 0 '${ch.replace(/'/g, "'\\''")}'`);
+        }
+      }
+    }
+  } catch (e) { log('handleInput err:', e.message); }
+}
 function ensureRfb() {
   // 如果 socket 不可写，视为已死，强制重建
   if (rfbSock && !rfbSock.writable) {
@@ -194,54 +229,10 @@ function ensureRfb() {
   return ensureRfb._pending;
 }
 
-async function handleInput(json) {
-  try {
-    const m = JSON.parse(json);
-    if (m.type === 'pointer') {
-      const mask = m.buttonMask | 0;
-      if (mask !== 0) {
-        // 点击走 xdotool（RFB button press 经 x11vnc 失效）
-        // mousedown 直接做一次完整点击；mouseup（mask=0）走下面的 RFB 移动
-        const btn = mask === 4 ? 3 : mask === 2 ? 2 : 1; // 1左 2中 4右 → xdotool 1/2/3
-        xdotool(`mousemove ${m.x|0} ${m.y|0} click ${btn}`);
-        return;
-      }
-      // 纯移动走 RFB（低延迟）
-      await ensureRfb().catch((e) => log('rfb connect fail:', e.message));
-      if (!rfbReady || !rfbSock) { log('rfb not ready, drop input'); return; }
-      const b = Buffer.alloc(6);
-      b[0] = 5; b[1] = 0;
-      b.writeUInt16BE(m.x | 0, 2); b.writeUInt16BE(m.y | 0, 4);
-      try { rfbSock.write(b); } catch (e) {
-        log('rfb write fail:', e.message);
-        rfbReady = false; rfbSock = null; ensureRfb._pending = null;
-      }
-    } else if (m.type === 'key') {
-      const ks = m.keysym >>> 0;
-      const xkey = KEYSYM_TO_XDOTOOL[ks];
-      if (xkey) {
-        // 特殊键走 xdotool（RFB 0xFFxx keysym 经 x11vnc 失效）
-        // 只在按下时触发一次完整按键（down+up），keyup 忽略
-        if (m.down) xdotool(`key ${xkey}`);
-        return;
-      }
-      // 普通字符走 RFB
-      await ensureRfb().catch((e) => log('rfb connect fail:', e.message));
-      if (!rfbReady || !rfbSock) { log('rfb not ready, drop input'); return; }
-      const b = Buffer.alloc(8);
-      b[0] = 4; b[1] = m.down ? 1 : 0; b.writeUInt32BE(ks, 4);
-      try { rfbSock.write(b); } catch (e) {
-        log('rfb write fail:', e.message);
-        rfbReady = false; rfbSock = null; ensureRfb._pending = null;
-      }
-    }
-  } catch (e) { log('handleInput err:', e.message); }
-}
-
 // ---- GStreamer ----
 // 视频直采：ximagesrc 直接从 X11 抓屏，不经过 x11vnc/RFB。
 // 原因：x11vnc 的 XDamage 跟踪会间歇性坏掉（返回 0 rects），导致视频黑屏。
-// ximagesrc 用 X11 原生抓屏，更稳定。输入仍走 RFB→x11vnc→XTEST。
+// ximagesrc 用 X11 原生抓屏，更稳定。
 // 注意：本机 x264enc 不支持 repeat-headers，SPS/PPS 只在流开头发送一次。
 // 因此首个客户端连接时重启 gst，确保新客户端能拿到 SPS/PPS 完成解码。
 let gstProc = null;
