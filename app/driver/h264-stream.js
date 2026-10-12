@@ -116,6 +116,8 @@ function broadcastH264(nal) {
 // （moves/clicks/特殊键均无反应），而 xdotool 直驱已验证有效。
 // 用持久化 bash 进程避免每次 spawn 开销。
 let xdotoolProc = null;
+// RFB（仅用于可打印字符的 KeyEvent，x11vnc 对普通字符翻译正常）
+let rfbSock = null, rfbReady = false;
 function ensureXdotool() {
   if (xdotoolProc && !xdotoolProc.killed) return xdotoolProc;
   const { spawn } = require('child_process');
@@ -278,21 +280,39 @@ async function handleInput(json) {
       const mask = m.buttonMask | 0;
       const x = m.x | 0, y = m.y | 0;
       if (mask !== 0) {
-        // 点击：移动+点击
+        // 点击走 xdotool（RFB button press 经 x11vnc 失效）
         const btn = mask === 4 ? 3 : mask === 2 ? 2 : 1;
         xdotool(`mousemove ${x} ${y} click ${btn}`);
       } else {
-        // 纯移动：节流，避免 xdotool 过载（每 30ms 最多一次）
-        const now = Date.now();
-        if (!handleInput._lastMove || now - handleInput._lastMove > 30) {
-          handleInput._lastMove = now;
-          xdotool(`mousemove ${x} ${y}`);
+        // 纯移动走 RFB（低延迟，x11vnc 对移动事件翻译正常）
+        await ensureRfb().catch((e) => log('rfb connect fail:', e.message));
+        if (!rfbReady || !rfbSock) { log('rfb not ready, drop move'); return; }
+        const b = Buffer.alloc(6);
+        b[0] = 5; b[1] = 0;
+        b.writeUInt16BE(x, 2); b.writeUInt16BE(y, 4);
+        try { rfbSock.write(b); } catch (e) {
+          log('rfb write fail:', e.message);
+          rfbReady = false; rfbSock = null; ensureRfb._pending = null;
         }
       }
     } else if (m.type === 'key') {
-      // 键盘走 CDP（Chrome 屏蔽 XTEST 字符输入）
-      // cdpKey 内部处理 down/up，insertText 只在 down 时
-      cdpKey(m.keysym, m.down);
+      const ks = m.keysym >>> 0;
+      // 可打印字符走 RFB（x11vnc 对普通字符的 XTEST 翻译正常）
+      // 特殊键走 xdotool（RFB 0xFFxx 经 x11vnc 失效，但 xdotool 直驱有效）
+      if (ks < 128) {
+        await ensureRfb().catch((e) => log('rfb connect fail:', e.message));
+        if (!rfbReady || !rfbSock) { log('rfb not ready, drop key'); return; }
+        const b = Buffer.alloc(8);
+        b[0] = 4; b[1] = m.down ? 1 : 0; b.writeUInt32BE(ks, 4);
+        try { rfbSock.write(b); } catch (e) {
+          log('rfb write fail:', e.message);
+          rfbReady = false; rfbSock = null; ensureRfb._pending = null;
+        }
+      } else {
+        // 特殊键走 xdotool
+        const xkey = KEYSYM_TO_XDOTOOL[ks];
+        if (xkey && m.down) xdotool(`key ${xkey}`);
+      }
     }
   } catch (e) { log('handleInput err:', e.message); }
 }
