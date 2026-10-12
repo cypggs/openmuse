@@ -254,13 +254,18 @@ async function cdpKey(keysym, down) {
       // 特殊键
       await cdpSend('Input.dispatchKeyEvent', { type, key: cdpKeyName });
     } else if (ks >= 32 && ks < 127) {
-      // 可打印 ASCII：用 windowsVirtualKeyCode（omnibox 是浏览器 UI，insertText 无效）
+      // 可打印 ASCII：先 keyDown，再 char（CDP 的 char 类型用于文本输入）
       const ch = String.fromCharCode(ks);
       let vk = ks;
-      if (ks >= 97 && ks <= 122) vk = ks - 32; // a-z → A-Z 的 VK
-      const params = { type, key: ch, windowsVirtualKeyCode: vk };
-      if (down) { params.text = ch; params.unmodifiedText = ch; }
-      await cdpSend('Input.dispatchKeyEvent', params);
+      if (ks >= 97 && ks <= 122) vk = ks - 32;
+      if (down) {
+        await cdpSend('Input.dispatchKeyEvent', {
+          type: 'keyDown', key: ch, windowsVirtualKeyCode: vk, text: ch, unmodifiedText: ch,
+        });
+        await cdpSend('Input.dispatchKeyEvent', { type: 'char', text: ch, unmodifiedText: ch });
+      } else {
+        await cdpSend('Input.dispatchKeyEvent', { type: 'keyUp', key: ch, windowsVirtualKeyCode: vk });
+      }
     }
   } catch (e) { log('cdpKey fail:', e.message); }
 }
