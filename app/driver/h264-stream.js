@@ -172,6 +172,7 @@ function cdpSend(method, params = {}) {
 }
 function ensureCdp() {
   if (cdpSock && !cdpSock.destroyed) return Promise.resolve();
+  log('[cdp] connecting...');
   return new Promise((resolve, reject) => {
     const http = require('http');
     http.get('http://127.0.0.1:9222/json/list', (res) => {
@@ -253,11 +254,12 @@ async function cdpKey(keysym, down) {
       // 特殊键
       await cdpSend('Input.dispatchKeyEvent', { type, key: cdpKeyName });
     } else if (ks >= 32 && ks < 127) {
-      // 可打印 ASCII：用 dispatchKeyEvent 发送字符（omnibox 是浏览器 UI，insertText 无效）
+      // 可打印 ASCII：用 windowsVirtualKeyCode（omnibox 是浏览器 UI，insertText 无效）
       const ch = String.fromCharCode(ks);
-      const params = { type, key: ch };
-      // keyDown 需要 text 字段来产生字符
-      if (down) params.text = ch;
+      let vk = ks;
+      if (ks >= 97 && ks <= 122) vk = ks - 32; // a-z → A-Z 的 VK
+      const params = { type, key: ch, windowsVirtualKeyCode: vk };
+      if (down) { params.text = ch; params.unmodifiedText = ch; }
       await cdpSend('Input.dispatchKeyEvent', params);
     }
   } catch (e) { log('cdpKey fail:', e.message); }
