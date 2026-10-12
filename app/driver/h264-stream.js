@@ -47,14 +47,16 @@ function handleWsHandshake(req, sock) {
     `Sec-WebSocket-Accept: ${accept}\r\n\r\n`
   );
   const client = { sock, buf: Buffer.alloc(0) };
-  const isFirst = clients.size === 0;
   clients.add(client);
   log('ws client connected, total:', clients.size);
-  // 首个客户端连接时重启 gst，确保其拿到流开头的 SPS/PPS（本机 x264enc 不支持 repeat-headers）
-  if (isFirst && gstProc) {
-    log('first client, restarting gst for SPS/PPS');
-    const old = gstProc; gstProc = null;
-    old.kill('SIGTERM');
+  // 注意：不再在首客户端时重启 gst（会导致重连恶性循环）。
+  // 新客户端等待下一个关键帧即可（key-int-max=30，15fps 下最多 2 秒）。
+  // 若 x264enc 支持 repeat-headers 可更优，但本机不支持。
+  // 新客户端先发送缓存的 SPS/PPS 头，确保能解码
+  if (broadcastH264.cache) {
+    for (const h of broadcastH264.cache) {
+      try { sendBinary(client, h); } catch (_) {}
+    }
   }
   sock.on('data', (d) => handleWsFrame(client, d));
   sock.on('close', () => { clients.delete(client); log('ws client gone, total:', clients.size); });
@@ -92,6 +94,13 @@ function sendBinary(client, data) {
 }
 
 function broadcastH264(nal) {
+  // 缓存流开头的 SPS/PPS（前几个 NAL），新客户端连接时先发送
+  if (!broadcastH264.headerDone) {
+    if (!broadcastH264.cache) broadcastH264.cache = [];
+    broadcastH264.cache.push(nal);
+    // 缓存前 5 个 NAL（应包含 SPS/PPS/IDR），之后不再缓存
+    if (broadcastH264.cache.length >= 5) broadcastH264.headerDone = true;
+  }
   for (const c of clients) {
     try { sendBinary(c, nal); } catch (_) { clients.delete(c); }
   }
@@ -237,6 +246,9 @@ function ensureRfb() {
 // 因此首个客户端连接时重启 gst，确保新客户端能拿到 SPS/PPS 完成解码。
 let gstProc = null;
 function startGst() {
+  // gst 重启时清空 SPS/PPS 缓存，新流的头会被重新缓存
+  broadcastH264.cache = null;
+  broadcastH264.headerDone = false;
   const args = [
     '-q',
     'ximagesrc', 'display-name=:99', 'show-pointer=true', 'use-damage=false',
