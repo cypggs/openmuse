@@ -146,6 +146,8 @@
     var buttons = 0;
     v.oncontextmenu = function (e) { e.preventDefault(); };
     v.addEventListener('mousedown', function (e) {
+      // 确保 video 获得键盘焦点，否则 keydown 收不到
+      try { v.focus({ preventScroll: true }); } catch (_) { v.focus(); }
       var p = videoPos(e);
       buttons = e.button === 0 ? 1 : e.button === 2 ? 4 : 2;
       sendInput({ type: 'pointer', x: p.x, y: p.y, buttonMask: buttons });
