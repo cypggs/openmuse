@@ -41,16 +41,12 @@ function handleWsHandshake(req, sock) {
   clients.add(client);
   log('ws client connected, total:', clients.size);
   // 注意：不再在首客户端时重启 gst（会导致重连恶性循环）。
-  // 新客户端等待下一个关键帧即可（key-int-max=30，15fps 下最多 2 秒）。
-  // 若 x264enc 支持 repeat-headers 可更优，但本机不支持。
-  // 新客户端先发送缓存的 SPS/PPS 头，确保能解码；若缓存未就绪，等就绪后补发
-  if (broadcastH264.cache && broadcastH264.headerDone) {
-    for (const h of broadcastH264.cache) {
-      try { sendBinary(client, h); } catch (_) {}
-    }
+  // 新客户端先发送缓存的 SPS/PPS，确保能解码；若缓存未就绪，等就绪后补发
+  if (spsPpsCache) {
+    try { sendBinary(client, spsPpsCache); } catch (_) {}
     client.gotHeaders = true;
   }
-  // 若缓存未就绪，broadcastH264 在缓存满 5 个时会补发（见上）
+  // 若缓存未就绪，NAL 解析器在拿到 SPS/PPS 后会补发（见 gst.stdout.on）
   sock.on('data', (d) => handleWsFrame(client, d));
   sock.on('close', () => { clients.delete(client); log('ws client gone, total:', clients.size); });
   sock.on('error', () => { clients.delete(client); });
@@ -87,28 +83,14 @@ function sendBinary(client, data) {
 }
 
 function broadcastH264(nal) {
-  // 缓存流开头的 SPS/PPS（前几个 NAL），新客户端连接时先发送
-  if (!broadcastH264.headerDone) {
-    if (!broadcastH264.cache) broadcastH264.cache = [];
-    broadcastH264.cache.push(nal);
-    // 缓存前 5 个 NAL（应包含 SPS/PPS/IDR），之后不再缓存
-    if (broadcastH264.cache.length >= 5) {
-      broadcastH264.headerDone = true;
-      // 缓存就绪，补发给之前连上但没拿到头的客户端
-      for (const c of clients) {
-        if (!c.gotHeaders) {
-          for (const h of broadcastH264.cache) {
-            try { sendBinary(c, h); } catch (_) {}
-          }
-          c.gotHeaders = true;
-        }
-      }
-    }
-  }
   for (const c of clients) {
     try { sendBinary(c, nal); } catch (_) { clients.delete(c); }
   }
 }
+
+// SPS/PPS 缓存（模块级，供新客户端使用）
+let spsPpsCache = null;
+let nalBuf = Buffer.alloc(0);
 
 // ---- 输入 ----
 // 全走 xdotool 直驱 X11 XTEST，不再用 RFB→x11vnc。
@@ -387,9 +369,11 @@ function ensureRfb() {
 // 因此首个客户端连接时重启 gst，确保新客户端能拿到 SPS/PPS 完成解码。
 let gstProc = null;
 function startGst() {
-  // gst 重启时清空 SPS/PPS 缓存，新流的头会被重新缓存
-  broadcastH264.cache = null;
-  broadcastH264.headerDone = false;
+  // gst 重启时清空 SPS/PPS 缓存和 NAL 缓冲，新流的头会被重新缓存
+  spsPpsCache = null;
+  nalBuf = Buffer.alloc(0);
+  // 旧客户端标记为未拿头，新流开始后会补发
+  for (const c of clients) c.gotHeaders = false;
   const args = [
     '-q',
     'ximagesrc', 'display-name=:99', 'show-pointer=true', 'use-damage=false',
@@ -418,8 +402,52 @@ function startGst() {
 
   // 直接转发原始 H264 字节流（Annex B），前端 JMuxer 负责解析
   // 不做 NAL 切分，避免解析 bug
+  // NAL 解析：缓存 SPS/PPS，新客户端先发送（spsPpsCache/nalBuf 为模块级变量）
   gst.stdout.on('data', (d) => {
-    if (clients.size > 0) broadcastH264(d);
+    if (clients.size === 0) return;
+    nalBuf = Buffer.concat([nalBuf, d]);
+    // 按 Annex B 起始码切分 NAL
+    const nals = [];
+    let start = 0;
+    for (let i = 0; i < nalBuf.length - 3; i++) {
+      if (nalBuf[i] === 0 && nalBuf[i+1] === 0) {
+        let scLen = 0;
+        if (nalBuf[i+2] === 1) scLen = 3;
+        else if (i+3 < nalBuf.length && nalBuf[i+2] === 0 && nalBuf[i+3] === 1) scLen = 4;
+        if (scLen > 0) {
+          if (i > start) nals.push(nalBuf.slice(start, i));
+          start = i;
+          i += scLen - 1;
+        }
+      }
+    }
+    // 保留最后一个不完整的 NAL
+    const remaining = nalBuf.slice(start);
+    nalBuf = remaining;
+    // 缓存 SPS/PPS（NAL type 7 和 8）
+    if (!spsPpsCache) {
+      for (const nal of nals) {
+        const scLen = (nal[2] === 1) ? 3 : 4;
+        const type = nal[scLen] & 0x1f;
+        if (type === 7 || type === 8) {
+          if (!spsPpsCache) spsPpsCache = [];
+          spsPpsCache.push(nal);
+          if (spsPpsCache.length >= 2) {
+            spsPpsCache = Buffer.concat(spsPpsCache);
+            // 补发给已连接但没拿到头的客户端
+            for (const c of clients) {
+              if (!c.gotHeaders) {
+                try { sendBinary(c, spsPpsCache); } catch (_) {}
+                c.gotHeaders = true;
+              }
+            }
+            break;
+          }
+        }
+      }
+    }
+    // 广播所有完整 NAL
+    for (const nal of nals) broadcastH264(nal);
   });
 }
 
