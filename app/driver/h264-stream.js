@@ -275,6 +275,7 @@ async function cdpKey(keysym, down) {
 async function handleInput(json) {
   try {
     const m = JSON.parse(json);
+    if (m.type === 'key') log('[input] key', m.keysym, m.down);
     if (m.type === 'pointer') {
       const mask = m.buttonMask | 0;
       const x = m.x | 0, y = m.y | 0;
