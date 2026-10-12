@@ -139,7 +139,11 @@ function ensureXdotool() {
 function xdotool(cmd) {
   try {
     const p = ensureXdotool();
-    if (p && p.stdin.writable) p.stdin.write('xdotool ' + cmd + '\n');
+    if (p && p.stdin.writable) {
+      // 临时调试：记录 key/click 命令
+      if (cmd.startsWith('key ') || cmd.includes('click')) log('[xdotool]', cmd);
+      p.stdin.write('xdotool ' + cmd + '\n');
+    }
   } catch (e) { log('xdotool fail:', e.message); }
 }
 // keysym → xdotool key 名
