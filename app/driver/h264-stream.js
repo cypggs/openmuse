@@ -257,6 +257,7 @@ const KEYSYM_TO_CDP = {
 async function cdpKey(keysym, down) {
   try {
     await ensureCdp();
+    log('[cdp] connected, sending key', keysym, down);
     const ks = keysym >>> 0;
     const cdpKeyName = KEYSYM_TO_CDP[ks];
     if (cdpKeyName) {
