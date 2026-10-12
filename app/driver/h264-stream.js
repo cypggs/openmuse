@@ -190,6 +190,8 @@ function ensureRfb() {
 }
 
 async function handleInput(json) {
+  // 临时调试
+  log('handleInput got:', json.slice(0, 80));
   try {
     const m = JSON.parse(json);
     if (m.type === 'pointer') {
