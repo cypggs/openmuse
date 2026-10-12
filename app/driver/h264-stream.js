@@ -194,7 +194,11 @@ function startGst() {
     '!', 'fdsink', 'fd=1',
   ];
   log('starting gst-launch-1.0');
-  const gst = spawn('gst-launch-1.0', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  // ximagesrc 需要 DISPLAY 才能连上 X11
+  const gst = spawn('gst-launch-1.0', args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, DISPLAY: ':99' },
+  });
   gst.stderr.on('data', d => {
     const s = d.toString().trim();
     if (s && !s.includes('WARNING') && s.length < 300) log('[gst]', s.slice(0, 150));
