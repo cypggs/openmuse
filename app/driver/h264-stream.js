@@ -1,8 +1,10 @@
 /**
  * openmuse H264 桌面推流服务（对标 Memoh 的 GStreamer pipeline）
  *
- * 链路：x11vnc(:5900 RFB) → gst-launch-1.0 (rfbsrc → x264enc → fdsink)
+ * 链路：ximagesrc(:99 X11直采) → gst-launch-1.0 (x264enc → fdsink)
  *       → Node 读 H264 NAL → WebSocket (8889) → 浏览器 JMuxer(MSE) → <video>
+ * 输入：浏览器 → WebSocket → Node RFB客户端 → x11vnc(:5900) → XTEST → X11
+ * (视频不走 x11vnc：其 XDamage 跟踪会间歇性坏掉导致黑屏)
  * 输入：WebSocket JSON → RFB PointerEvent/KeyEvent → x11vnc
  *
  * GStreamer pipeline 与 Memoh 的 H264 分支一致（除了末端用 fdsink 不用 udpsink）：
@@ -177,11 +179,13 @@ async function handleInput(json) {
 }
 
 // ---- GStreamer ----
+// 视频直采：ximagesrc 直接从 X11 抓屏，不经过 x11vnc/RFB。
+// 原因：x11vnc 的 XDamage 跟踪会间歇性坏掉（返回 0 rects），导致视频黑屏。
+// ximagesrc 用 X11 原生抓屏，更稳定。输入仍走 RFB→x11vnc→XTEST。
 function startGst() {
   const args = [
     '-q',
-    'rfbsrc', `host=${RFB_HOST}`, `port=${RFB_PORT}`, 'shared=true',
-    'incremental=false', 'use-copyrect=true', 'do-timestamp=true',
+    'ximagesrc', 'display-name=:99', 'show-pointer=true', 'use-damage=false',
     '!', 'videoconvert',
     '!', 'videorate', '!', 'video/x-raw,framerate=15/1',
     '!', 'queue', 'leaky=downstream', 'max-size-buffers=2',
