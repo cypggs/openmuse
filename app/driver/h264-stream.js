@@ -98,7 +98,39 @@ function broadcastH264(nal) {
 }
 
 // ---- RFB 输入 ----
+// 混合输入策略：
+// - 鼠标移动、普通字符：走 RFB→x11vnc（低延迟，已验证可用）
+// - 鼠标点击、特殊键（Enter/Backspace等）：走 xdotool 直驱 XTEST
+//   （x11vnc 的 RFB→XTEST 对 button press 和 0xFFxx keysym 翻译失效，
+//    已用 xdotool 实测 Enter 可触发导航，证明 X11 XTEST 本身正常）
 let rfbSock = null, rfbReady = false;
+
+// xdotool 持久化 bash，避免每次 spawn 进程开销
+let xdotoolProc = null;
+function ensureXdotool() {
+  if (xdotoolProc && !xdotoolProc.killed) return xdotoolProc;
+  const { spawn } = require('child_process');
+  xdotoolProc = spawn('bash', [], {
+    env: { ...process.env, DISPLAY: ':99' },
+    stdio: ['pipe', 'ignore', 'ignore'],
+  });
+  xdotoolProc.on('exit', () => { xdotoolProc = null; });
+  xdotoolProc.on('error', () => { xdotoolProc = null; });
+  return xdotoolProc;
+}
+function xdotool(cmd) {
+  try {
+    const p = ensureXdotool();
+    if (p && p.stdin.writable) p.stdin.write('xdotool ' + cmd + '\n');
+  } catch (e) { log('xdotool fail:', e.message); }
+}
+// keysym → xdotool key 名（只列特殊键，普通字符走 RFB）
+const KEYSYM_TO_XDOTOOL = {
+  0xff08: 'BackSpace', 0xff09: 'Tab', 0xff0d: 'Return', 0xff1b: 'Escape',
+  0xffff: 'Delete', 0xff50: 'Home', 0xff57: 'End',
+  0xff51: 'Left', 0xff52: 'Up', 0xff53: 'Right', 0xff54: 'Down',
+  0xffe1: 'Shift_L', 0xffe3: 'Control_L', 0xffe9: 'Alt_L', 0xffe7: 'Super_L',
+};
 function ensureRfb() {
   if (rfbReady) return Promise.resolve();
   if (ensureRfb._pending) return ensureRfb._pending;
@@ -160,27 +192,43 @@ function ensureRfb() {
 async function handleInput(json) {
   try {
     const m = JSON.parse(json);
-    await ensureRfb().catch((e) => log('rfb connect fail:', e.message));
-    if (!rfbReady || !rfbSock) { log('rfb not ready, drop input'); return; }
-    const sendRfb = (b) => {
-      try {
-        // 若 socket 已死，write 返回 false 或抛错；标记重连，下次输入重建
-        const ok = rfbSock.write(b);
-        if (!ok) log('rfb write buffered');
-      } catch (e) {
+    if (m.type === 'pointer') {
+      const mask = m.buttonMask | 0;
+      if (mask !== 0) {
+        // 点击走 xdotool（RFB button press 经 x11vnc 失效）
+        // mousedown 直接做一次完整点击；mouseup（mask=0）走下面的 RFB 移动
+        const btn = mask === 4 ? 3 : mask === 2 ? 2 : 1; // 1左 2中 4右 → xdotool 1/2/3
+        xdotool(`mousemove ${m.x|0} ${m.y|0} click ${btn}`);
+        return;
+      }
+      // 纯移动走 RFB（低延迟）
+      await ensureRfb().catch((e) => log('rfb connect fail:', e.message));
+      if (!rfbReady || !rfbSock) { log('rfb not ready, drop input'); return; }
+      const b = Buffer.alloc(6);
+      b[0] = 5; b[1] = 0;
+      b.writeUInt16BE(m.x | 0, 2); b.writeUInt16BE(m.y | 0, 4);
+      try { rfbSock.write(b); } catch (e) {
         log('rfb write fail:', e.message);
         rfbReady = false; rfbSock = null; ensureRfb._pending = null;
       }
-    };
-    if (m.type === 'pointer') {
-      const b = Buffer.alloc(6);
-      b[0] = 5; b[1] = m.buttonMask | 0;
-      b.writeUInt16BE(m.x | 0, 2); b.writeUInt16BE(m.y | 0, 4);
-      sendRfb(b);
     } else if (m.type === 'key') {
+      const ks = m.keysym >>> 0;
+      const xkey = KEYSYM_TO_XDOTOOL[ks];
+      if (xkey) {
+        // 特殊键走 xdotool（RFB 0xFFxx keysym 经 x11vnc 失效）
+        // 只在按下时触发一次完整按键（down+up），keyup 忽略
+        if (m.down) xdotool(`key ${xkey}`);
+        return;
+      }
+      // 普通字符走 RFB
+      await ensureRfb().catch((e) => log('rfb connect fail:', e.message));
+      if (!rfbReady || !rfbSock) { log('rfb not ready, drop input'); return; }
       const b = Buffer.alloc(8);
-      b[0] = 4; b[1] = m.down ? 1 : 0; b.writeUInt32BE(m.keysym >>> 0, 4);
-      sendRfb(b);
+      b[0] = 4; b[1] = m.down ? 1 : 0; b.writeUInt32BE(ks, 4);
+      try { rfbSock.write(b); } catch (e) {
+        log('rfb write fail:', e.message);
+        rfbReady = false; rfbSock = null; ensureRfb._pending = null;
+      }
     }
   } catch (e) { log('handleInput err:', e.message); }
 }
