@@ -132,6 +132,11 @@ const KEYSYM_TO_XDOTOOL = {
   0xffe1: 'Shift_L', 0xffe3: 'Control_L', 0xffe9: 'Alt_L', 0xffe7: 'Super_L',
 };
 function ensureRfb() {
+  // 如果 socket 不可写，视为已死，强制重建
+  if (rfbSock && !rfbSock.writable) {
+    log('rfb sock not writable, resetting');
+    rfbReady = false; rfbSock = null; ensureRfb._pending = null;
+  }
   if (rfbReady) return Promise.resolve();
   if (ensureRfb._pending) return ensureRfb._pending;
   ensureRfb._pending = new Promise((resolve, reject) => {
@@ -190,8 +195,6 @@ function ensureRfb() {
 }
 
 async function handleInput(json) {
-  // 临时调试
-  log('handleInput got:', json.slice(0, 80));
   try {
     const m = JSON.parse(json);
     if (m.type === 'pointer') {
