@@ -246,17 +246,19 @@ const KEYSYM_TO_CDP = {
 async function cdpKey(keysym, down) {
   try {
     await ensureCdp();
-    log('[cdp] connected, sending key', keysym, down);
     const ks = keysym >>> 0;
     const cdpKeyName = KEYSYM_TO_CDP[ks];
+    const type = down ? 'keyDown' : 'keyUp';
     if (cdpKeyName) {
-      // 特殊键：dispatchKeyEvent
-      const type = down ? 'keyDown' : 'keyUp';
+      // 特殊键
       await cdpSend('Input.dispatchKeyEvent', { type, key: cdpKeyName });
-    } else if (ks < 128 && down) {
-      // 可打印字符：insertText（只在按下时）
+    } else if (ks >= 32 && ks < 127) {
+      // 可打印 ASCII：用 dispatchKeyEvent 发送字符（omnibox 是浏览器 UI，insertText 无效）
       const ch = String.fromCharCode(ks);
-      await cdpSend('Input.insertText', { text: ch });
+      const params = { type, key: ch };
+      // keyDown 需要 text 字段来产生字符
+      if (down) params.text = ch;
+      await cdpSend('Input.dispatchKeyEvent', params);
     }
   } catch (e) { log('cdpKey fail:', e.message); }
 }
