@@ -10,17 +10,6 @@
  * （x11vnc 的 RFB 输入已废弃：其 XTEST 翻译对点击/特殊键失效；
  *   xdotool 的 XTEST 字符输入被 Chrome 屏蔽，故键盘走 CDP）
  */
- *   rfbsrc host=127.0.0.1 port=5900 shared=true incremental=false use-copyrect=true do-timestamp=true
- *   ! videoconvert ! videorate ! video/x-raw,framerate=15/1
- *   ! queue leaky=downstream max-size-buffers=2
- *   ! x264enc tune=zerolatency speed-preset=ultrafast bframes=0 key-int-max=30 byte-stream=true
- *   ! video/x-h264,profile=baseline,stream-format=byte-stream,alignment=au
- *   ! fdsink fd=1
- * （注：已去掉 h264parse——输出 Annex B 直给 JMuxer；avcC 转换会导致黑屏，见 commit 0e4880d）
- *
- * 运行：node h264-stream.js (sandbox 内, WS_PORT=8889)
- * 传输层预留 WebRTC 替换位（当前用 WebSocket 穿 E2B HTTP 代理）。
- */
 'use strict';
 
 const http = require('http');
