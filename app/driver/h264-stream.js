@@ -47,8 +47,15 @@ function handleWsHandshake(req, sock) {
     `Sec-WebSocket-Accept: ${accept}\r\n\r\n`
   );
   const client = { sock, buf: Buffer.alloc(0) };
+  const isFirst = clients.size === 0;
   clients.add(client);
   log('ws client connected, total:', clients.size);
+  // 首个客户端连接时重启 gst，确保其拿到流开头的 SPS/PPS（本机 x264enc 不支持 repeat-headers）
+  if (isFirst && gstProc) {
+    log('first client, restarting gst for SPS/PPS');
+    const old = gstProc; gstProc = null;
+    old.kill('SIGTERM');
+  }
   sock.on('data', (d) => handleWsFrame(client, d));
   sock.on('close', () => { clients.delete(client); log('ws client gone, total:', clients.size); });
   sock.on('error', () => { clients.delete(client); });
@@ -182,6 +189,9 @@ async function handleInput(json) {
 // 视频直采：ximagesrc 直接从 X11 抓屏，不经过 x11vnc/RFB。
 // 原因：x11vnc 的 XDamage 跟踪会间歇性坏掉（返回 0 rects），导致视频黑屏。
 // ximagesrc 用 X11 原生抓屏，更稳定。输入仍走 RFB→x11vnc→XTEST。
+// 注意：本机 x264enc 不支持 repeat-headers，SPS/PPS 只在流开头发送一次。
+// 因此首个客户端连接时重启 gst，确保新客户端能拿到 SPS/PPS 完成解码。
+let gstProc = null;
 function startGst() {
   const args = [
     '-q',
@@ -190,7 +200,7 @@ function startGst() {
     '!', 'videorate', '!', 'video/x-raw,framerate=15/1',
     '!', 'queue', 'leaky=downstream', 'max-size-buffers=2',
     '!', 'x264enc', 'tune=zerolatency', 'speed-preset=ultrafast',
-    'bframes=0', 'key-int-max=30', 'repeat-headers=true', 'byte-stream=true',
+    'bframes=0', 'key-int-max=30', 'byte-stream=true',
     '!', 'fdsink', 'fd=1',
   ];
   log('starting gst-launch-1.0');
@@ -199,11 +209,15 @@ function startGst() {
     stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, DISPLAY: ':99' },
   });
+  gstProc = gst;
   gst.stderr.on('data', d => {
     const s = d.toString().trim();
     if (s && !s.includes('WARNING') && s.length < 300) log('[gst]', s.slice(0, 150));
   });
-  gst.on('exit', (c) => { log('gst exited', c, 'restarting in 2s'); setTimeout(startGst, 2000); });
+  gst.on('exit', (c) => {
+    if (gstProc === gst) gstProc = null;
+    log('gst exited', c, 'restarting in 2s'); setTimeout(startGst, 2000);
+  });
 
   // 直接转发原始 H264 字节流（Annex B），前端 JMuxer 负责解析
   // 不做 NAL 切分，避免解析 bug
