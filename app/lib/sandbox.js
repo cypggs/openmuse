@@ -28,6 +28,13 @@ const CHECKPOINT_EVERY = 50; // 每 50 次 tool 执行做一次原生 snapshot �
 const REAPER_INTERVAL_MS = 60_000;
 const SNAP_PREFIX = 'sandbox-snapshots/'; // 仅 S3 导出层使用
 
+// 总开关：设为 '1' 时，禁止一切 sandbox 创建/恢复/连接（彻底停机省钱）。
+// getSandbox / findExisting 会直接抛错，不触碰 E2B API。
+const SANDBOX_DISABLED = process.env.OPENMUSE_SANDBOX_DISABLED === '1';
+function assertSandboxEnabled() {
+  if (SANDBOX_DISABLED) throw new Error('云电脑功能已暂停维护（OPENMUSE_SANDBOX_DISABLED=1）');
+}
+
 const E2B_API_KEY = process.env.E2B_API_KEY || '';
 
 const SANDBOX_README = `# openmuse 云电脑
@@ -184,6 +191,7 @@ async function importFromS3(userId, sbx) {
 // ---------- get-or-create ----------
 // findExisting: 只找"能用的"（running，或 paused→connect 自动 resume），绝不新建。
 async function findExisting(userId) {
+  assertSandboxEnabled();
   const entry = live.get(userId);
   if (entry) {
     try {
@@ -247,6 +255,7 @@ async function findExisting(userId) {
 }
 
 async function getSandbox(userId) {
+  assertSandboxEnabled();
   if (!E2B_API_KEY) throw new Error('E2B_API_KEY 未配置，云电脑不可用');
   // 迁移进行中时等待（避免竞态：一个在杀老 sandbox，另一个还在用）
   if (migrating.has(userId)) {
